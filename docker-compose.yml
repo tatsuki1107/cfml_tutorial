@@ -1,0 +1,12 @@
+version: '3.7'
+
+services:
+  python:
+    container_name: cfml_tutorial
+    build: .
+    volumes:
+      - .:/app
+    tty: true
+    ports:
+      - 8888:8888
+    command: poetry run jupyter lab --allow-root --ip=0.0.0.0 --LabApp.token=""
