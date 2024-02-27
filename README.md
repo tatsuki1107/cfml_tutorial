@@ -7,7 +7,7 @@
 <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on-policy/contextual_bandit/contextual_bandit.py">`contextual_bandit.py`</a>
 
 ### notebook
-- <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on-policy/contextual_bandit/continuous_reward.ipynb">`continuous_reward.ipynb`</a>
+- <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on-policy/contextual_bandit/continous_reward.ipynb">`continuous_reward.ipynb`</a>
 - <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on-policy/contextual_bandit/binary_reward.ipynb">`binary_reward.ipynb`</a>
 
 ### Derivation of policy
