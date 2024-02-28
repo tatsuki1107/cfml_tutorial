@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
+from web_server import ContextualWebServer
+
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
     """The sigmoid function.
@@ -16,75 +18,6 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
     """
 
     return np.exp(np.minimum(x, 0)) / (1 + np.exp(-np.abs(x)))
-
-
-@dataclass
-class ContextualWebServer:
-    n_action: int
-    dim_action_context: int
-    dim_user_context: int
-    dim_context: int
-    reward_type: str  # "binary" or "continuous"
-    noise_ver: float
-    seed: int
-
-    def __post_init__(self) -> None:
-        """Initialize the action contexts and the parameters."""
-        # i.i.d
-        np.random.seed(self.seed)
-        self.action_contexts = np.random.normal(
-            0, 1, size=(self.n_action, self.dim_action_context)
-        )
-
-        self.theta = np.random.normal(0, 1, size=(self.n_action, self.dim_context))
-
-        if self.reward_type not in {"binary", "continuous"}:
-            raise ValueError("reward_type must be 'binary' or 'continuous'")
-
-    def request(self, t: int) -> np.ndarray:
-        """Get the contexts based on the time step.
-
-        Args:
-            t (int): The time step.
-
-        Returns:
-            np.ndarray: The contexts.
-        """
-
-        np.random.seed(t)
-        user_context = np.random.normal(0, 1, size=(self.dim_user_context))
-        return user_context
-
-    def response(
-        self, contexts: np.ndarray, selected_action: np.int64
-    ) -> Tuple[np.float64, np.float64]:
-        """Play a slot machine.
-
-        Args:
-            contexts (np.ndarray): The contexts.
-            selected_action (np.int64): The selected action.
-
-        Returns:
-            np.float64: The reward and regret.
-        """
-
-        # calculate reward
-        counterfactual_rewards = []
-        for action in range(self.n_action):
-            mu = np.dot(contexts[action], self.theta[action])
-            if self.reward_type == "binary":
-                reward = np.random.binomial(n=1, p=sigmoid(mu))
-            elif self.reward_type == "continuous":
-                reward = np.random.normal(mu, self.noise_ver)
-
-            counterfactual_rewards.append(reward)
-
-        counterfactual_rewards = np.array(counterfactual_rewards)
-
-        # regret
-        regret = counterfactual_rewards.max() - counterfactual_rewards[selected_action]
-
-        return counterfactual_rewards[selected_action], regret
 
 
 @dataclass
@@ -104,16 +37,21 @@ class BaseContextualPolicy(ABC):
     n_action: int
     dim_action_context: int
     dim_context: int
-    seed: int
     noise_ver: float
     noise_zero_ver: float
+    batch_size: int
 
     def __post_init__(self) -> None:
-
-        np.random.seed(self.seed)
+        """Initialize the contextual bandit algorithm."""
         self.action_contexts = np.random.normal(
             0, 1, size=(self.n_action, self.dim_action_context)
         )
+
+        self.reward_per_time = []
+        self.cumulative_regret = [0]
+
+        # [(context, action, reward), ...]
+        self.batched_data = []
 
     @abstractmethod
     def run(self, *kwargs) -> Dict[str, List[np.float64]]:
@@ -124,6 +62,17 @@ class BaseContextualPolicy(ABC):
             Cumulative reward and cumulative regret.
         """
         pass
+
+    def _append_batch_data(
+        self,
+        context: np.ndarray,
+        selected_action: int,
+        reward: np.float64,
+        regret: np.float64,
+    ) -> None:
+        self.batched_data.append((context, selected_action, reward))
+        self.reward_per_time.append(reward)
+        self.cumulative_regret.append(self.cumulative_regret[-1] + regret)
 
     def _preprocess_contexts(self, user_context: np.ndarray) -> np.ndarray:
         contexts = []
@@ -172,7 +121,9 @@ class LinUCB(BaseContextualPolicy):
         self, web_server: ContextualWebServer
     ) -> Tuple[List[np.float64], List[np.float64]]:
 
-        reward_per_time, cumulative_regret = [], [0]
+        # initialize
+        self.theta_hats = self._calc_global_optimum()
+
         for t in range(1, self.T + 1):
             # 時刻t時点でweb上に訪れたユーザー文脈をサーバー側で取得
             user_context = web_server.request(t)
@@ -180,10 +131,9 @@ class LinUCB(BaseContextualPolicy):
             contexts = self._preprocess_contexts(user_context)
 
             # contexts をもとに速攻でucbスコアを算出.
-            theta_hat = self._get_global_optimum()
             alpha_t = self.alpha * np.sqrt(np.log(t))
             ucb_scores = self._calc_ucb_scores(
-                contexts=contexts, theta_hat=theta_hat, alpha_t=alpha_t
+                contexts=contexts, theta_hats=self.theta_hats, alpha_t=alpha_t
             )
 
             # アクションを選択して、クライアントに返す
@@ -193,28 +143,26 @@ class LinUCB(BaseContextualPolicy):
                 contexts=contexts, selected_action=selected_action
             )
 
-            reward_per_time.append(reward)
-            cumulative_regret.append(cumulative_regret[-1] + regret)
-
-            # update parametar
-            self._update_inversed_A(
-                context=contexts[selected_action], selected_action=selected_action
-            )
-            self._update_vector_b(
+            self._append_batch_data(
                 context=contexts[selected_action],
                 selected_action=selected_action,
                 reward=reward,
+                regret=regret,
             )
 
-        cumulative_reward = self._calc_cumulative_reward(reward_per_time)
+            if t % self.batch_size == 0:
+                # update parametar
+                self.theta_hats = self._update_parameter()
+
+        cumulative_reward = self._calc_cumulative_reward(self.reward_per_time)
 
         return dict(
             cumulative_reward=cumulative_reward,
-            reward_per_time=reward_per_time,
-            cumulative_regret=cumulative_regret,
+            reward_per_time=self.reward_per_time,
+            cumulative_regret=self.cumulative_regret,
         )
 
-    def _get_global_optimum(self) -> np.ndarray:
+    def _calc_global_optimum(self) -> np.ndarray:
         """Estimate the least squares estimator
 
         Returns:
@@ -229,7 +177,7 @@ class LinUCB(BaseContextualPolicy):
         return np.array(theta_hats)
 
     def _calc_ucb_scores(
-        self, contexts: np.ndarray, theta_hat: np.ndarray, alpha_t: np.float64
+        self, contexts: np.ndarray, theta_hats: np.ndarray, alpha_t: np.float64
     ) -> list:
         """Calculate the upper confidence bound scores.
 
@@ -244,13 +192,24 @@ class LinUCB(BaseContextualPolicy):
 
         ucb_scores = []
         for action in range(self.n_action):
-            ucb_score = np.dot(contexts[action], theta_hat[action]) + alpha_t * np.sqrt(
+            ucb_score = np.dot(
+                contexts[action], theta_hats[action]
+            ) + alpha_t * np.sqrt(
                 self.noise_ver
                 * (contexts[action].T @ self.inversed_A[action] @ contexts[action])
             )
             ucb_scores.append(ucb_score)
 
         return ucb_scores
+
+    def _update_parameter(self) -> np.ndarray:
+        for context, action, reward in self.batched_data:
+            self._update_inversed_A(context, action)
+            self._update_vector_b(context, action, reward)
+
+        self.batched_data = []
+        theta_hats = self._calc_global_optimum()
+        return theta_hats
 
     def _update_inversed_A(
         self, context: np.ndarray, selected_action: np.int64
@@ -300,18 +259,17 @@ class LinThompsonSampling(BaseContextualPolicy):
         self, web_server: ContextualWebServer
     ) -> Tuple[List[np.float64], List[np.float64]]:
 
-        reward_per_time, cumulative_regret = [], [0]
         for t in range(1, self.T + 1):
             # 時刻t時点でweb上に訪れた単一ユーザー文脈をサーバー側で取得
             user_context = web_server.request(t)
             # 各アクションの文脈との交互作用を考慮した文脈 "contexts" を生成
             contexts = self._preprocess_contexts(user_context)
 
-            # "contexts" をもとに速攻でパラメータをベイズ推論
-            theta_hats = self._sampling_theta_hats()
+            # 各アクションに対してパラメータをサンプリング
+            self.theta_hats = self._sampling_theta_hats()
             # 線形バンディットの報酬モデルから各アクションに対する報酬期待値を計算
             expected_rewards = self._get_expected_rewards(
-                contexts=contexts, theta_hats=theta_hats
+                contexts=contexts, theta_hats=self.theta_hats
             )
 
             # 期待値最大のアクションを選択して、
@@ -321,25 +279,23 @@ class LinThompsonSampling(BaseContextualPolicy):
                 contexts=contexts, selected_action=selected_action
             )
 
-            reward_per_time.append(reward)
-            cumulative_regret.append(cumulative_regret[-1] + regret)
-
-            # update parametar
-            self._update_inversed_A(
-                context=contexts[selected_action], selected_action=selected_action
-            )
-            self._update_vector_b(
+            self._append_batch_data(
                 context=contexts[selected_action],
                 selected_action=selected_action,
                 reward=reward,
+                regret=regret,
             )
 
-        cumulative_reward = self._calc_cumulative_reward(reward_per_time)
+            if t % self.batch_size == 0:
+                # update parametar
+                self._update_parameter()
+
+        cumulative_reward = self._calc_cumulative_reward(self.reward_per_time)
 
         return dict(
             cumulative_reward=cumulative_reward,
-            reward_per_time=reward_per_time,
-            cumulative_regret=cumulative_regret,
+            reward_per_time=self.reward_per_time,
+            cumulative_regret=self.cumulative_regret,
         )
 
     def _sampling_theta_hats(self) -> np.ndarray:
@@ -378,6 +334,13 @@ class LinThompsonSampling(BaseContextualPolicy):
             expected_rewards.append(expected_reward)
 
         return np.array(expected_rewards)
+
+    def _update_parameter(self) -> None:
+        for context, action, reward in self.batched_data:
+            self._update_inversed_A(context, action)
+            self._update_vector_b(context, action, reward)
+
+        self.batched_data = []
 
     def _update_inversed_A(
         self, context: np.ndarray, selected_action: np.int64
@@ -432,7 +395,6 @@ class LogisticThompsonSampling(BaseContextualPolicy):
         self, web_server: ContextualWebServer
     ) -> Tuple[List[np.float64], List[np.float64]]:
 
-        reward_per_time, cumulative_regret = [], [0]
         for t in range(1, self.T + 1):
 
             # 時刻t時点でweb上に訪れた単一ユーザー文脈をサーバー側で取得
@@ -454,21 +416,23 @@ class LogisticThompsonSampling(BaseContextualPolicy):
                 contexts=contexts, selected_action=selected_action
             )
 
-            reward_per_time.append(reward)
-            cumulative_regret.append(cumulative_regret[-1] + regret)
-
-            self._update_theta_hats(
+            self._append_batch_data(
                 context=contexts[selected_action],
                 selected_action=selected_action,
                 reward=reward,
+                regret=regret,
             )
 
-        cumulative_reward = self._calc_cumulative_reward(reward_per_time)
+            if t % self.batch_size == 0:
+                # update parametar
+                self._update_parameter()
+
+        cumulative_reward = self._calc_cumulative_reward(self.reward_per_time)
 
         return dict(
             cumulative_reward=cumulative_reward,
-            reward_per_time=reward_per_time,
-            cumulative_regret=cumulative_regret,
+            reward_per_time=self.reward_per_time,
+            cumulative_regret=self.cumulative_regret,
         )
 
     def _sampling_theta_tilde(self) -> np.ndarray:
@@ -502,39 +466,47 @@ class LogisticThompsonSampling(BaseContextualPolicy):
 
         return np.array(expected_rewards)
 
-    def _update_theta_hats(
-        self, context: np.ndarray, selected_action: np.int64, reward: np.float64
-    ) -> None:
+    def _update_parameter(self) -> None:
 
-        self.logged_contexts[selected_action].append(context.tolist())
-        self.logged_rewards[selected_action].append(reward)
+        batched_unique_actions = set()
+        for context, action, reward in self.batched_data:
+            self.logged_contexts[action].append(context.tolist())
+            self.logged_rewards[action].append(reward)
+            batched_unique_actions.add(action)
 
-        contexts = np.array(self.logged_contexts[selected_action])
-        rewards = np.array(self.logged_rewards[selected_action])
+        for action in batched_unique_actions:
+            self._update_theta_hats(action)
+
+        self.batched_data = []
+
+    def _update_theta_hats(self, action: np.int64) -> None:
+
+        contexts = np.array(self.logged_contexts[action])
+        rewards = np.array(self.logged_rewards[action])
 
         for _ in range(self.n_epoch):
-            gradient = self._calc_gradient(contexts, selected_action, rewards)
-            self.inversed_hessian[selected_action] = self._calc_inversed_hessian(
-                contexts, selected_action
+            gradient = self._calc_gradient(contexts, action, rewards)
+            self.inversed_hessian[action] = self._calc_inversed_hessian(
+                contexts, action
             )
 
-            self.theta_hats[selected_action] = self.theta_hats[
-                selected_action
-            ] - np.dot(self.inversed_hessian[selected_action], gradient)
+            self.theta_hats[action] = self.theta_hats[action] - np.dot(
+                self.inversed_hessian[action], gradient
+            )
 
     def _calc_gradient(
-        self, contexts: np.ndarray, selected_action: np.int64, rewards: np.float64
+        self, contexts: np.ndarray, action: np.int64, rewards: np.float64
     ) -> np.ndarray:
-        mu_hats = sigmoid(np.dot(contexts, self.theta_hats[selected_action]))
-        gradient = (1 / self.noise_zero_ver) * self.theta_hats[selected_action]
+        mu_hats = sigmoid(np.dot(contexts, self.theta_hats[action]))
+        gradient = (1 / self.noise_zero_ver) * self.theta_hats[action]
         gradient += np.sum((mu_hats - rewards)[:, None] * contexts, axis=0)
 
         return gradient
 
     def _calc_inversed_hessian(
-        self, contexts: np.ndarray, selected_action: np.int64
+        self, contexts: np.ndarray, action: np.int64
     ) -> np.ndarray:
-        mu_hats = sigmoid(np.dot(contexts, self.theta_hats[selected_action]))
+        mu_hats = sigmoid(np.dot(contexts, self.theta_hats[action]))
         hessian = (1 / self.noise_zero_ver) * np.eye(self.dim_context)
         for t in range(contexts.shape[0]):
             hessian += (

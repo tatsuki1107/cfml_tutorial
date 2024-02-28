@@ -1,14 +1,14 @@
 # Counter Factual Machine Learning Tutorial
 
-# On-Policy
+# On Policy
 
 ## Contextual Bandit
 ### code
-<a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on-policy/contextual_bandit/contextual_bandit.py">`contextual_bandit.py`</a>
+<a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on_policy/contextual_bandit/contextual_bandit.py">`contextual_bandit.py`</a>
 
 ### notebook
-- <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on-policy/contextual_bandit/continous_reward.ipynb">`continuous_reward.ipynb`</a>
-- <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on-policy/contextual_bandit/binary_reward.ipynb">`binary_reward.ipynb`</a>
+- <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on_policy/contextual_bandit/continous_reward.ipynb">`continuous_reward.ipynb`</a>
+- <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/on_policy/contextual_bandit/binary_reward.ipynb">`binary_reward.ipynb`</a>
 
 ### Derivation of policy
 - LinUCB:　<a href="https://qiita.com/tatsuki1107/items/02d51371f8db9eccfb30">`LinUCB方策のUCBスコア導出`</a>  
