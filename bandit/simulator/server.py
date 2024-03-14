@@ -5,6 +5,8 @@ from time import time
 
 import numpy as np
 
+# web server
+
 
 @dataclass
 class BaseWebServer(ABC):
@@ -43,7 +45,6 @@ class WebServer(BaseWebServer):
 @dataclass
 class ContextualWebServer(BaseWebServer):
     n_action: int
-    dim_action_context: int
     dim_user_context: int
     dim_context: int
     reward_type: str  # "binary" or "continuous"
@@ -104,7 +105,7 @@ class ContextualWebServer(BaseWebServer):
 
 
 @dataclass
-class RecommendWebServer(BaseWebServer):
+class MFWebServer(BaseWebServer):
     n_user: int
     n_action: int
     dim_context: int
@@ -181,3 +182,19 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
     """
 
     return np.exp(np.minimum(x, 0)) / (1 + np.exp(-np.abs(x)))
+
+
+# backend server
+
+
+def generate_action_context(n_action: int, dim_context: int) -> np.ndarray:
+    """Generate the action context.
+
+    Args:
+        n_action (int): The number of actions.
+        dim_context (int): The dimension of the context.
+
+    Returns:
+        np.ndarray: The action context.
+    """
+    return np.random.normal(0, 1, size=(n_action, dim_context))

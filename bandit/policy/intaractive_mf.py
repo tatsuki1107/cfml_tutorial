@@ -4,7 +4,7 @@ from typing import List, Dict
 
 import numpy as np
 
-from web_server import RecommendWebServer
+from simulator import MFWebServer
 
 
 @dataclass
@@ -85,7 +85,7 @@ class MFThompsonSampling(BaseMFPolicy):
         self.vector_b_u = np.zeros((self.n_user, self.dim_context))
         self.vector_b_a = np.zeros((self.n_action, self.dim_context))
 
-    def run(self, web_server: RecommendWebServer) -> Dict[str, List[np.float64]]:
+    def run(self, web_server: MFWebServer) -> Dict[str, List[np.float64]]:
 
         for t in range(self.T):
             user = web_server.request(t)

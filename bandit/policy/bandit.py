@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from web_server import WebServer
+from simulator import WebServer
 
 
 @dataclass
