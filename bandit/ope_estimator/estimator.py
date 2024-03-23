@@ -60,7 +60,32 @@ class ReplayMethod(BaseEstimator):
 
 
 @dataclass
-class IPS(BaseEstimator):
+class DirectMethod(BaseEstimator):
+
+    def estimate(
+        self,
+        contexts: np.ndarray,
+        rewards_hats: np.ndarray,
+    ) -> np.float64:
+
+        pi_new_rewards = []
+        for t, (context, rewards_hat) in enumerate(zip(contexts, rewards_hats)):
+            tiled_contexts = np.tile(context, (self.n_action, 1))
+            selected_action = self.policy.select_action(
+                contexts=tiled_contexts, t=t + 1
+            )
+
+            reward_hat = rewards_hat[selected_action]
+            pi_new_rewards.append(reward_hat)
+
+            batch_data = [[context, selected_action, reward_hat, None]]
+            self.policy.update_parameter(batch_data=batch_data)
+
+        return np.mean(pi_new_rewards)
+
+
+@dataclass
+class InversePropensityScore(BaseEstimator):
     """Estimate the reward using Inverse Propensity Score (IPS)."""
 
     def estimate(
@@ -96,5 +121,37 @@ class IPS(BaseEstimator):
 
                 batch_data = [[context, action, reward, None]]
                 self.policy.update_parameter(batch_data=batch_data)
+
+        return np.mean(pi_new_rewards)
+
+
+@dataclass
+class DoublyRobust(BaseEstimator):
+
+    def estimate(
+        self,
+        contexts: np.ndarray,
+        pi_b: np.ndarray,
+        actions: np.ndarray,
+        rewards: np.ndarray,
+        rewards_hats: np.ndarray,
+    ) -> np.float64:
+
+        pi_new_rewards = []
+        for t, (context, pi_b, action, reward, rewards_hat) in enumerate(
+            zip(contexts, pi_b, actions, rewards, rewards_hats)
+        ):
+            tiled_contexts = np.tile(context, (self.n_action, 1))
+            selected_action = self.policy.select_action(
+                contexts=tiled_contexts, t=t + 1
+            )
+            reward_hat = rewards_hat[selected_action]
+            binary_indicator = int(selected_action == action)
+
+            _reward = binary_indicator * ((reward - reward_hat) / pi_b) + reward_hat
+            pi_new_rewards.append(_reward)
+
+            batch_data = [[context, selected_action, _reward, None]]
+            self.policy.update_parameter(batch_data=batch_data)
 
         return np.mean(pi_new_rewards)
