@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import Optional
 from abc import ABC, abstractmethod
 
 import numpy as np
@@ -35,7 +34,7 @@ class BaseContextualPolicy(ABC):
     noise_zero_ver: float
 
     @abstractmethod
-    def select_action(self, user_context: np.ndarray, t: Optional[int] = None) -> int:
+    def select_action(self, user_context: np.ndarray) -> int:
         pass
 
     @abstractmethod
@@ -63,11 +62,10 @@ class LinUCB(BaseContextualPolicy):
         # initialize parameter
         self._calc_global_optimum()
 
-    def select_action(self, contexts: np.ndarray, t: int) -> int:
+    def select_action(self, contexts: np.ndarray) -> int:
         # contexts をもとに速攻でucbスコアを算出.
-        alpha_t = self.alpha * np.sqrt(np.log(t))
         ucb_scores = self._calc_ucb_scores(
-            contexts=contexts, theta_hats=self.theta_hats, alpha_t=alpha_t
+            contexts=contexts, theta_hats=self.theta_hats
         )
 
         # アクションを選択して、クライアントに返す
@@ -89,9 +87,7 @@ class LinUCB(BaseContextualPolicy):
 
         self.theta_hats = np.array(theta_hats)
 
-    def _calc_ucb_scores(
-        self, contexts: np.ndarray, theta_hats: np.ndarray, alpha_t: np.float64
-    ) -> list:
+    def _calc_ucb_scores(self, contexts: np.ndarray, theta_hats: np.ndarray) -> list:
         """Calculate the upper confidence bound scores.
 
         Args:
@@ -107,7 +103,7 @@ class LinUCB(BaseContextualPolicy):
         for action in range(self.n_action):
             ucb_score = np.dot(
                 contexts[action], theta_hats[action]
-            ) + alpha_t * np.sqrt(
+            ) + self.alpha * np.sqrt(
                 self.noise_ver
                 * (contexts[action].T @ self.inversed_A[action] @ contexts[action])
             )
@@ -164,7 +160,7 @@ class LinThompsonSampling(BaseContextualPolicy):
         )
         self.vector_b = np.zeros((self.n_action, self.dim_context))
 
-    def select_action(self, contexts: np.ndarray, t: Optional[int] = None) -> int:
+    def select_action(self, contexts: np.ndarray) -> int:
         # 各アクションに対してパラメータをサンプリング
         self.theta_hats = self._sampling_theta_hats()
         # 線形バンディットの報酬モデルから各アクションに対する報酬期待値を計算
@@ -267,7 +263,7 @@ class LogisticThompsonSampling(BaseContextualPolicy):
         self.logged_contexts = [[] for _ in range(self.n_action)]
         self.logged_rewards = [[] for _ in range(self.n_action)]
 
-    def select_action(self, contexts: np.ndarray, t: Optional[int] = None) -> int:
+    def select_action(self, contexts: np.ndarray) -> int:
 
         theta_tildes = self._sampling_theta_tilde()
 

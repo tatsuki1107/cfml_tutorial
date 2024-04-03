@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import numpy as np
+from sklearn.ensemble import GradientBoostingClassifier as GBC
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
@@ -86,8 +87,11 @@ class NNTrainer:
             val_logloss = self._calculate_logloss(val_pi_b_hats, val_actions)
             self.val_loss.append(val_logloss.item())
 
-        pi_b = self.predict_proba(_contexts)
-        return pi_b.detach().numpy()
+        pi_b_hats = self.predict_proba(_contexts)
+        pi_b_hats = pi_b_hats.detach().numpy()
+
+        indices = np.arange(len(actions))
+        return pi_b_hats[indices, actions]
 
     def predict_proba(self, contexts: torch.Tensor) -> torch.Tensor:
         pi_b = self.model(contexts)
@@ -115,3 +119,27 @@ class NNTrainer:
         val_actions = actions[val_idx]
 
         return train_contexts, train_actions, val_contexts, val_actions
+
+
+@dataclass
+class GBCModel:
+    n_estimators: int
+    max_depth: int
+    lr: float
+    random_state: int = 12345
+
+    def __post_init__(self) -> None:
+        self.model = GBC(
+            n_estimators=self.n_estimators,
+            max_depth=self.max_depth,
+            learning_rate=self.lr,
+            random_state=self.random_state,
+        )
+
+    def fit(self, contexts: np.ndarray, actions: np.ndarray) -> np.ndarray:
+
+        self.model.fit(contexts, actions)
+        pi_b_hats = self.model.predict_proba(contexts)
+
+        indices = np.arange(len(actions))
+        return pi_b_hats[indices, actions]

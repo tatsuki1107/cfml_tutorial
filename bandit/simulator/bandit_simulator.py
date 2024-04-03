@@ -19,9 +19,10 @@ def _chack_instance(policy, web_server):
 
 @dataclass
 class BanditSimulator:
-    T: int
+    n_round: int
     batch_size: int
     n_action: int
+    start_time: int = 1
     action_contexts: Optional[np.ndarray] = None
 
     def _initialize_data(self) -> None:
@@ -49,7 +50,7 @@ class BanditSimulator:
         _chack_instance(policy, web_server)
         self._initialize_data()
 
-        for t in range(1, self.T + 1):
+        for t in range(self.start_time, self.start_time + self.n_round):
             # 時刻t時点でweb上に訪れたユーザー文脈をサーバー側で取得
             user_context = web_server.request(t)
             # アクションの文脈との交互作用を考慮した文脈 "contexts" を生成
@@ -59,7 +60,7 @@ class BanditSimulator:
             if policy == "Random":
                 selected_action = np.random.randint(self.n_action)
             else:
-                selected_action = policy.select_action(contexts, t)
+                selected_action = policy.select_action(contexts)
             # すぐに報酬がサーバー側に返ってくる
             reward, regret = web_server.response(contexts, selected_action)
 
@@ -67,7 +68,7 @@ class BanditSimulator:
                 (contexts[selected_action], selected_action, reward, regret)
             )
 
-            if t % self.batch_size == 0 or t == self.T:
+            if t % self.batch_size == 0 or t == self.start_time + self.n_round:
                 if policy != "Random":
                     policy.update_parameter(self.batch_data)
                 self.log_data.extend(self.batch_data)

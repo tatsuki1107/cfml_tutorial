@@ -6,9 +6,11 @@ from ope_estimator.estimator import DoublyRobust
 
 # action distribution
 from ope_estimator.action_dist import NNTrainer
+from ope_estimator.action_dist import GBCModel
 
 # reward prediction model
 from ope_estimator.q_hat import LogisticRegressionModel
+from ope_estimator.q_hat import GBRModel
 
 __all__ = [
     "ReplayMethod",
@@ -16,5 +18,7 @@ __all__ = [
     "InversePropensityScore",
     "DoublyRobust",
     "NNTrainer",
+    "GBCModel",
     "LogisticRegressionModel",
+    "GBRModel",
 ]

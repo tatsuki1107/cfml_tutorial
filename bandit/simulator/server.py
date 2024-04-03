@@ -52,7 +52,7 @@ class ContextualWebServer(BaseWebServer):
 
     def __post_init__(self) -> None:
         """Initialize the action contexts and the parameters."""
-        # i.i.d
+
         self.theta = np.random.normal(0, 1, size=(self.n_action, self.dim_context))
 
         if self.reward_type not in {"binary", "continuous"}:
@@ -74,7 +74,7 @@ class ContextualWebServer(BaseWebServer):
 
     def response(
         self, contexts: np.ndarray, selected_action: np.int64
-    ) -> Tuple[np.float64, np.float64]:
+    ) -> Tuple[np.float64, np.float64, np.ndarray]:
         """Play a slot machine.
 
         Args:
@@ -86,22 +86,26 @@ class ContextualWebServer(BaseWebServer):
         """
         np.random.seed(int(time()))
         # calculate reward
-        counterfactual_rewards = []
+        counterfactual_expected_reward = []
         for action in range(self.n_action):
             mu = np.dot(contexts[action], self.theta[action])
+
             if self.reward_type == "binary":
-                reward = np.random.binomial(n=1, p=sigmoid(mu))
-            elif self.reward_type == "continuous":
-                reward = np.random.normal(mu, self.noise_ver)
+                mu = sigmoid(mu)
+            counterfactual_expected_reward.append(mu)
 
-            counterfactual_rewards.append(reward)
+        counterfactual_expected_reward = np.array(counterfactual_expected_reward)
+        expected_reward = counterfactual_expected_reward[selected_action]
 
-        counterfactual_rewards = np.array(counterfactual_rewards)
+        if self.reward_type == "binary":
+            reward = np.random.binomial(n=1, p=expected_reward)
+        elif self.reward_type == "continuous":
+            reward = np.random.normal(expected_reward, self.noise_ver)
 
         # regret
-        regret = counterfactual_rewards.max() - counterfactual_rewards[selected_action]
+        regret = counterfactual_expected_reward.max() - expected_reward
 
-        return counterfactual_rewards[selected_action], regret
+        return reward, regret
 
 
 @dataclass
