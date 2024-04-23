@@ -66,10 +66,10 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         slate_actions = self.all_slate_actions[sampled_slate_index]
         pscore = ranking_pi_b[np.arange(n_rounds), sampled_slate_index]
 
-        expected_reward_factual = self.reward_function(
+        expected_reward = self.reward_function(
             context=context,
             action_context=self.action_context,
-            slate_action=slate_actions,
+            all_slate_action=self.all_slate_actions,
             base_reward_function=self.base_reward_function,
             reward_structure=self.reward_structure,
             len_list=self.len_list,
@@ -78,7 +78,9 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
 
         # \mathbb{r} ~ p(\mathbb{r} | x, \mathbb{a})
         reward = self.sample_reward_given_expected_reward(
-            expected_reward_factual=expected_reward_factual
+            expected_reward_factual=expected_reward[
+                np.arange(n_rounds), sampled_slate_index
+            ]
         )
 
         # marginalization
@@ -106,7 +108,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             action_context=self.action_context,
             action=slate_actions,
             reward=reward,
-            expected_reward_factual=expected_reward_factual,
+            expected_reward=expected_reward,
             pscore=pscore,
             pscore_item_position=pscore_item_position,
             pscore_cascade=pscore_cascade,
@@ -114,6 +116,16 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             marginal_pi_b_at_position=marginal_pi_b_at_position,
             marginal_pi_b_cascade=marginal_pi_b_cascade,
         )
+
+    def calc_ground_truth_policy_value(
+        self,
+        expected_reward: np.ndarray,
+        evaluation_policy: np.ndarray,
+        alpha: np.ndarray,
+    ) -> np.float64:
+
+        sum_expected_reward = np.sum(expected_reward * alpha, axis=2)
+        return np.average(sum_expected_reward, weights=evaluation_policy, axis=1).mean()
 
     def sample_reward_given_expected_reward(
         self,
@@ -236,7 +248,7 @@ def logistic_reward_function(
 
     if z_score:
         expected_rewards = (
-            expected_rewards - expected_rewards.mean()
+            (expected_rewards - expected_rewards.mean())
         ) / expected_rewards.std()
 
     return sigmoid(expected_rewards)
@@ -245,30 +257,31 @@ def logistic_reward_function(
 def action_interaction_reward_function(
     context: np.ndarray,
     action_context: np.ndarray,
-    slate_action: np.ndarray,
+    all_slate_action: np.ndarray,
     base_reward_function: Callable,
     reward_structure: str,
     len_list: int,
     random_: np.random.RandomState,
 ) -> np.ndarray:
 
-    expected_reward = base_reward_function(
+    expected_reward_per_action: np.ndarray = base_reward_function(
         context=context,
         action_context=action_context,
         random_=random_,
     )
     n_rounds = len(context)
 
-    expected_reward_factual = []
+    expected_reward = []
     for pos_ in range(len_list):
         if reward_structure == "independent":
-            expected_reward_pos_ = expected_reward[
-                np.arange(n_rounds), slate_action[:, pos_]
+            expected_reward_pos_ = expected_reward_per_action[
+                np.arange(n_rounds)[:, np.newaxis], all_slate_action[:, pos_]
             ]
         else:
             raise NotImplementedError
-        expected_reward_factual.append(expected_reward_pos_)
+        expected_reward.append(expected_reward_pos_)
 
-    expected_reward_factual = np.array(expected_reward_factual).T
+    # shape: (n_rounds, n_slate, len_list)
+    expected_reward = np.array(expected_reward).transpose(1, 2, 0)
 
-    return expected_reward_factual
+    return expected_reward
