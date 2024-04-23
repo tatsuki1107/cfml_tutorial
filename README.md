@@ -23,5 +23,13 @@
 ### notebook
 - <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/bandit/ope.ipynb">`ope.ipynb`</a>
 
+# 2. Basic OPE/OPL
+### notebook
+- <a href="https://github.com/tatsuki1107/cfml_tutorial/blob/master/basic/basic_ope_using_obp.ipynb">`basic_ope_using_obp.ipynb`</a>
+
 ### Explanatory article about the estimator
 - DirectMethod(DM), InversePropensityScore(IPS), DoublyRobust(DR) Estimator: <a href="https://qiita.com/tatsuki1107/items/20fd7c6ccb7019f10766">`オフ方策評価におけるDM,IPS,DR推定量の期待値/分散の分析 (最後に「プラットフォーム全体で観測される報酬のオフ方策評価」と題してユニークなIPS推定量を導出しました)`</a>
+
+# 3. Ranking
+
+
