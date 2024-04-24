@@ -62,7 +62,9 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         )
 
         # \mathbb{a} ~ \pi_b(\mathbb{a} | x)
-        sampled_slate_index = sample_action_fast(action_dist=ranking_pi_b)
+        sampled_slate_index = sample_action_fast(
+            action_dist=ranking_pi_b, random_state=self.random_state
+        )
         slate_actions = self.all_slate_actions[sampled_slate_index]
         pscore = ranking_pi_b[np.arange(n_rounds), sampled_slate_index]
 
@@ -85,14 +87,12 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
 
         # marginalization
         if return_pscore_item_position:
-            marginal_pi_b_at_position = self.compute_marginal_probability(
-                ranking_pi=ranking_pi_b
+            marginal_pi_b_at_position, pscore_item_position = (
+                self.compute_marginal_probability(
+                    ranking_pi=ranking_pi_b,
+                    slate_actions=slate_actions,
+                )
             )
-            pscore_item_position = marginal_pi_b_at_position[
-                np.arange(n_rounds)[:, np.newaxis],
-                np.arange(self.len_list),
-                slate_actions,
-            ]
         else:
             marginal_pi_b_at_position, pscore_item_position = None, None
 
@@ -104,6 +104,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         return dict(
             n_rounds=n_rounds,
             n_unique_action=self.n_unique_action,
+            slate_id=sampled_slate_index,
             context=context,
             action_context=self.action_context,
             action=slate_actions,
@@ -140,15 +141,27 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         return reward
 
     def compute_marginal_probability(
-        self, ranking_pi: np.ndarray, num_workers=cpu_count() - 1
-    ):
+        self,
+        ranking_pi: np.ndarray,
+        slate_actions: np.ndarray,
+        num_workers=cpu_count() - 1,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         with Pool(num_workers) as p:
             job_args = [(ranking_pi_i) for ranking_pi_i in ranking_pi]
             marginal_pi = list(p.imap(self._compute_marginal_probability_i, job_args))
 
-        return np.array(marginal_pi)
+        marginal_pi = np.array(marginal_pi)
 
-    def _compute_marginal_probability_i(self, ranking_pi_i: np.ndarray):
+        n_rounds = marginal_pi.shape[0]
+        pscore_item_position = marginal_pi[
+            np.arange(n_rounds)[:, np.newaxis],
+            np.arange(self.len_list),
+            slate_actions,
+        ]
+
+        return marginal_pi, pscore_item_position
+
+    def _compute_marginal_probability_i(self, ranking_pi_i: np.ndarray) -> list:
 
         marginal_pi_i = [[] for _ in range(self.len_list)]
         for pos_ in range(self.len_list):
