@@ -1,7 +1,7 @@
 from abc import ABCMeta
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Tuple
+from typing import Callable, Tuple, List
 from multiprocessing import Pool, cpu_count
 from itertools import permutations
 
@@ -12,7 +12,6 @@ from obp.utils import sigmoid, softmax, sample_action_fast
 
 
 class BaseBanditDataset(metaclass=ABCMeta):
-
     @abstractmethod
     def obtain_batch_bandit_feedback(self) -> None:
         raise NotImplementedError
@@ -45,9 +44,8 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         self,
         n_rounds: int,
         return_pscore_item_position: bool = True,
-        return_pscore_cascade: bool = False,
+        return_pscore_cascade: bool = True,
     ) -> dict:
-
         # context ~ p(x)
         context = self.random_.normal(size=(n_rounds, self.dim_context))
 
@@ -87,17 +85,25 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
 
         # marginalization
         if return_pscore_item_position:
-            marginal_pi_b_at_position, pscore_item_position = (
-                self.compute_marginal_probability(
-                    ranking_pi=ranking_pi_b,
-                    slate_actions=slate_actions,
-                )
+            (
+                marginal_pi_b_at_position,
+                pscore_item_position,
+            ) = self.compute_marginal_probability_at_position(
+                ranking_pi=ranking_pi_b,
+                slate_actions=slate_actions,
             )
         else:
             marginal_pi_b_at_position, pscore_item_position = None, None
 
         if return_pscore_cascade:
-            raise NotImplementedError
+            (
+                marginal_pi_b_cascade,
+                pscore_cascade,
+            ) = self.compute_marginal_probability_cascade(
+                ranking_pi=ranking_pi_b,
+                slate_actions=slate_actions,
+            )
+
         else:
             marginal_pi_b_cascade, pscore_cascade = None, None
 
@@ -124,7 +130,6 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         evaluation_policy: np.ndarray,
         alpha: np.ndarray,
     ) -> np.float64:
-
         sum_expected_reward = np.sum(expected_reward * alpha, axis=2)
         return np.average(sum_expected_reward, weights=evaluation_policy, axis=1).mean()
 
@@ -132,15 +137,17 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         self,
         expected_reward_factual: np.ndarray,
     ) -> np.ndarray:
+        if self.click_model == "pbm":
+            raise NotImplementedError
 
-        if self.reward_structure == "independent" and self.click_model is None:
+        if self.reward_structure in {"independent", "cascade"}:
             reward = self.random_.binomial(n=1, p=expected_reward_factual)
         else:
             raise NotImplementedError
 
         return reward
 
-    def compute_marginal_probability(
+    def compute_marginal_probability_at_position(
         self,
         ranking_pi: np.ndarray,
         slate_actions: np.ndarray,
@@ -148,7 +155,9 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
     ) -> Tuple[np.ndarray, np.ndarray]:
         with Pool(num_workers) as p:
             job_args = [(ranking_pi_i) for ranking_pi_i in ranking_pi]
-            marginal_pi = list(p.imap(self._compute_marginal_probability_i, job_args))
+            marginal_pi = list(
+                p.imap(self._compute_marginal_probability_at_position_i, job_args)
+            )
 
         marginal_pi = np.array(marginal_pi)
 
@@ -161,8 +170,9 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
 
         return marginal_pi, pscore_item_position
 
-    def _compute_marginal_probability_i(self, ranking_pi_i: np.ndarray) -> list:
-
+    def _compute_marginal_probability_at_position_i(
+        self, ranking_pi_i: np.ndarray
+    ) -> list:
         marginal_pi_i = [[] for _ in range(self.len_list)]
         for pos_ in range(self.len_list):
             for action in range(self.n_unique_action):
@@ -172,12 +182,47 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
 
         return marginal_pi_i
 
+    def compute_marginal_probability_cascade(
+        self,
+        ranking_pi: np.ndarray,
+        slate_actions: np.ndarray,
+        num_workers=cpu_count() - 1,
+    ) -> Tuple[List[dict], np.ndarray]:
+        with Pool(num_workers) as p:
+            job_args = [(ranking_pi_i) for ranking_pi_i in ranking_pi]
+            marginal_pi = list(
+                p.imap(self._compute_marginal_probability_cascade_i, job_args)
+            )
+
+        marginal_pscore = []
+        for marginal_pi_i, action in zip(marginal_pi, slate_actions):
+            pscore_1_to_k = [
+                marginal_pi_i[tuple(action[: pos_ + 1])]
+                for pos_ in range(self.len_list)
+            ]
+            marginal_pscore.append(pscore_1_to_k)
+
+        marginal_pscore = np.array(marginal_pscore)
+
+        return marginal_pi, marginal_pscore
+
+    def _compute_marginal_probability_cascade_i(self, ranking_pi_i: np.ndarray) -> dict:
+        marginal_pi_i = {}
+        for pos_ in range(self.len_list):
+            for slate in np.array(list(permutations(range(10), pos_ + 1))):
+                action_indicator = np.all(
+                    self.all_slate_actions[:, : pos_ + 1] == slate[: pos_ + 1], axis=1
+                )
+                marginal_pscore = ranking_pi_i[action_indicator].sum()
+                marginal_pi_i[tuple(slate)] = marginal_pscore
+
+        return marginal_pi_i
+
     def compute_ranking_pi_given_policy_logit(
         self,
         policy_logit: np.ndarray,
         num_worker: int = cpu_count() - 1,
     ) -> np.ndarray:
-
         with Pool(num_worker) as p:
             job_args = [policy_logit_i for policy_logit_i in policy_logit]
             ranking_pi = list(p.imap(self._compute_ranking_pi_i, job_args))
@@ -185,7 +230,6 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         return np.array(ranking_pi)
 
     def _compute_ranking_pi_i(self, policy_logit_i_):
-
         n_slate_actions_ = len(self.all_slate_actions)
         unique_action_set_2d = np.tile(
             np.arange(self.n_unique_action), reps=(n_slate_actions_, 1)
@@ -241,7 +285,6 @@ def logistic_reward_function(
     degree: int = 1,
     z_score: bool = True,
 ) -> np.ndarray:
-
     poly = PolynomialFeatures(degree=degree)
     context_ = poly.fit_transform(context)
     action_context_ = poly.fit_transform(action_context)
@@ -276,7 +319,6 @@ def action_interaction_reward_function(
     len_list: int,
     random_: np.random.RandomState,
 ) -> np.ndarray:
-
     expected_reward_per_action: np.ndarray = base_reward_function(
         context=context,
         action_context=action_context,
@@ -284,17 +326,21 @@ def action_interaction_reward_function(
     )
     n_rounds = len(context)
 
-    expected_reward = []
-    for pos_ in range(len_list):
+    # shape: (n_rounds, n_slate, len_list)
+    expected_reward = expected_reward_per_action[
+        np.arange(n_rounds)[:, np.newaxis], all_slate_action[:, np.newaxis]
+    ].transpose(1, 0, 2)
+
+    for pos_ in reversed(range(1, len_list)):
         if reward_structure == "independent":
-            expected_reward_pos_ = expected_reward_per_action[
-                np.arange(n_rounds)[:, np.newaxis], all_slate_action[:, pos_]
-            ]
+            continue
+
+        elif reward_structure == "cascade":
+            expected_reward[:, :, pos_] *= (1 - expected_reward[:, :, :pos_]).prod(
+                axis=2
+            )
+
         else:
             raise NotImplementedError
-        expected_reward.append(expected_reward_pos_)
-
-    # shape: (n_rounds, n_slate, len_list)
-    expected_reward = np.array(expected_reward).transpose(1, 2, 0)
 
     return expected_reward

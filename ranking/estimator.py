@@ -71,3 +71,25 @@ class SlateIndependentInversePropensityScore(BaseSlateInversePropensityScore):
             behavior_policy_pscore=marginal_behavior_policy_pscore_at_position,
             evaluation_policy_pscore=marginal_evaluation_policy_pscore_at_position,
         ).mean()
+
+
+@dataclass
+class SlateRewardInteractionInversePropensityScore(BaseSlateInversePropensityScore):
+    """Slate Reward Interaction Inverse Propensity Score (RIPS) Estimator."""
+
+    estimator_name: str = "rips"
+
+    def estimate_policy_value(
+        self,
+        reward: np.ndarray,
+        alpha: np.ndarray,
+        behavior_policy_pscore_cascade: np.ndarray,
+        evaluation_policy_pscore_cascade: np.ndarray,
+    ) -> float:
+        """Estimate the policy value of evaluation policy."""
+        return self._estimate_round_rewards(
+            reward=reward,
+            alpha=alpha,
+            behavior_policy_pscore=behavior_policy_pscore_cascade,
+            evaluation_policy_pscore=evaluation_policy_pscore_cascade,
+        ).mean()
