@@ -1,7 +1,7 @@
 from abc import ABCMeta
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Tuple, List
+from typing import Callable, Tuple, List, Optional, Dict
 from multiprocessing import Pool, cpu_count
 from itertools import permutations
 
@@ -22,12 +22,12 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
     n_unique_action: int
     len_list: int
     dim_context: int
-    reward_structure: str = "independent"
+    behavior_ratio: dict
     base_reward_function: Callable = None
     reward_function: Callable = None
     behavior_policy_function: Callable = None
-    click_model: str = None
     random_state: int = 12345
+    reward_noise: float = 1.0
 
     def __post_init__(self) -> None:
         self.random_ = check_random_state(self.random_state)
@@ -36,6 +36,11 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             list(permutations(range(self.n_unique_action), self.len_list))
         )
 
+        self.user_behavior_to_index = {
+            behabior_name: i
+            for i, behabior_name in enumerate(self.behavior_ratio.keys())
+        }
+
         self.behavior_policy_function = mf_behavior_policy_logit
         self.base_reward_function = logistic_reward_function
         self.reward_function = action_interaction_reward_function
@@ -43,10 +48,10 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
     def obtain_batch_bandit_feedback(
         self,
         n_rounds: int,
-        return_pscore_item_position: bool = True,
-        return_pscore_cascade: bool = True,
+        return_pscore: Dict[str, bool],
+        return_pi_b: bool = False,
     ) -> dict:
-        # context ~ p(x)
+        # x ~ p(x)
         context = self.random_.normal(size=(n_rounds, self.dim_context))
 
         behavior_policy_logit_ = self.behavior_policy_function(
@@ -63,15 +68,20 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         sampled_slate_index = sample_action_fast(
             action_dist=ranking_pi_b, random_state=self.random_state
         )
+
         slate_actions = self.all_slate_actions[sampled_slate_index]
-        pscore = ranking_pi_b[np.arange(n_rounds), sampled_slate_index]
+
+        # \mathbb{c} ~ p(\mathbb{c} | x)
+        user_behavior_idx, user_behavior = self._sample_user_behavior(
+            n_rounds=n_rounds, random_=self.random_
+        )
 
         expected_reward = self.reward_function(
             context=context,
             action_context=self.action_context,
             all_slate_action=self.all_slate_actions,
             base_reward_function=self.base_reward_function,
-            reward_structure=self.reward_structure,
+            user_behavior_to_index=self.user_behavior_to_index,
             len_list=self.len_list,
             random_=self.random_,
         )
@@ -79,33 +89,17 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         # \mathbb{r} ~ p(\mathbb{r} | x, \mathbb{a})
         reward = self.sample_reward_given_expected_reward(
             expected_reward_factual=expected_reward[
-                np.arange(n_rounds), sampled_slate_index
+                np.arange(n_rounds), user_behavior_idx, sampled_slate_index
             ]
         )
 
-        # marginalization
-        if return_pscore_item_position:
-            (
-                marginal_pi_b_at_position,
-                pscore_item_position,
-            ) = self.compute_marginal_probability_at_position(
-                ranking_pi=ranking_pi_b,
-                slate_actions=slate_actions,
-            )
-        else:
-            marginal_pi_b_at_position, pscore_item_position = None, None
-
-        if return_pscore_cascade:
-            (
-                marginal_pi_b_cascade,
-                pscore_cascade,
-            ) = self.compute_marginal_probability_cascade(
-                ranking_pi=ranking_pi_b,
-                slate_actions=slate_actions,
-            )
-
-        else:
-            marginal_pi_b_cascade, pscore_cascade = None, None
+        pi_b, pscore = self.aggregate_propensity_score(
+            ranking_pi=ranking_pi_b,
+            slate_id=sampled_slate_index,
+            return_pscore=return_pscore,
+            user_behavior=user_behavior,
+            return_pi=return_pi_b,
+        )
 
         return dict(
             n_rounds=n_rounds,
@@ -116,35 +110,58 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             action=slate_actions,
             reward=reward,
             expected_reward=expected_reward,
+            user_behavior_id=user_behavior_idx,
+            user_behavior=user_behavior,
             pscore=pscore,
-            pscore_item_position=pscore_item_position,
-            pscore_cascade=pscore_cascade,
-            ranking_pi_b=ranking_pi_b,
-            marginal_pi_b_at_position=marginal_pi_b_at_position,
-            marginal_pi_b_cascade=marginal_pi_b_cascade,
+            pi_b=pi_b,
         )
 
     def calc_ground_truth_policy_value(
         self,
+        alpha: np.ndarray,
         expected_reward: np.ndarray,
         evaluation_policy: np.ndarray,
-        alpha: np.ndarray,
+        user_behavior_prob: np.ndarray,
     ) -> np.float64:
-        sum_expected_reward = np.sum(expected_reward * alpha, axis=2)
-        return np.average(sum_expected_reward, weights=evaluation_policy, axis=1).mean()
+
+        # \sum_{k=1}^K \alpha_k q_k(x, \Phi_k(\mathbb{c}, \mathbb{a}))
+        weighted_expected_reward = np.sum(expected_reward * alpha, axis=3)
+
+        # \sum_{\mathbb{a}} \pi_e(\mathbb{a} | x) * weighted_expected_reward
+        policy_weighted_reward = np.sum(
+            weighted_expected_reward * evaluation_policy[:, np.newaxis, :], axis=2
+        )
+
+        # \frac{1}{n} \sum_{i=1}^n \sum_{\mathbb{c}} p(\mathbb{c}|x) *
+        # policy_weighted_reward
+        return np.average(
+            policy_weighted_reward, weights=user_behavior_prob, axis=1
+        ).mean()
+
+    def _sample_user_behavior(
+        self, n_rounds: int, random_: np.random.RandomState
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        # sample context free behavior
+        user_behavior = random_.choice(
+            list(self.behavior_ratio.keys()),
+            p=list(self.behavior_ratio.values()),
+            size=n_rounds,
+        )
+        user_behabior_idx = np.array(
+            [
+                self.user_behavior_to_index[behabior_name]
+                for behabior_name in user_behavior
+            ]
+        )
+
+        return user_behabior_idx, user_behavior
 
     def sample_reward_given_expected_reward(
         self,
         expected_reward_factual: np.ndarray,
     ) -> np.ndarray:
-        if self.click_model == "pbm":
-            raise NotImplementedError
 
-        if self.reward_structure in {"independent", "cascade"}:
-            reward = self.random_.binomial(n=1, p=expected_reward_factual)
-        else:
-            raise NotImplementedError
-
+        reward = self.random_.normal(expected_reward_factual, scale=self.reward_noise)
         return reward
 
     def compute_marginal_probability_at_position(
@@ -209,7 +226,9 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
     def _compute_marginal_probability_cascade_i(self, ranking_pi_i: np.ndarray) -> dict:
         marginal_pi_i = {}
         for pos_ in range(self.len_list):
-            for slate in np.array(list(permutations(range(10), pos_ + 1))):
+            for slate in np.array(
+                list(permutations(range(self.n_unique_action), pos_ + 1))
+            ):
                 action_indicator = np.all(
                     self.all_slate_actions[:, : pos_ + 1] == slate[: pos_ + 1], axis=1
                 )
@@ -230,6 +249,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         return np.array(ranking_pi)
 
     def _compute_ranking_pi_i(self, policy_logit_i_):
+
         n_slate_actions_ = len(self.all_slate_actions)
         unique_action_set_2d = np.tile(
             np.arange(self.n_unique_action), reps=(n_slate_actions_, 1)
@@ -253,6 +273,72 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
                 )
 
         return ranking_pi_i
+
+    def aggregate_propensity_score(
+        self,
+        ranking_pi: np.ndarray,
+        slate_id: np.ndarray,
+        return_pscore: Dict[str, bool],
+        user_behavior: np.ndarray,
+        return_pi: bool = False,
+    ) -> Tuple[Optional[dict], dict]:
+        # marginalization
+        if return_pscore["independent"]:
+            (
+                marginal_pi_at_position,
+                pscore_item_position,
+            ) = self.compute_marginal_probability_at_position(
+                ranking_pi=ranking_pi,
+                slate_actions=self.all_slate_actions[slate_id],
+            )
+        else:
+            marginal_pi_at_position, pscore_item_position = None, None
+
+        if return_pscore["cascade"]:
+            (
+                marginal_pi_cascade,
+                pscore_cascade,
+            ) = self.compute_marginal_probability_cascade(
+                ranking_pi=ranking_pi,
+                slate_actions=self.all_slate_actions[slate_id],
+            )
+
+        else:
+            marginal_pi_cascade, pscore_cascade = None, None
+
+        n_rounds = len(slate_id)
+        pscore_all = ranking_pi[np.arange(n_rounds), slate_id]
+        tiled_pscore_all = np.tile(pscore_all[:, np.newaxis], reps=self.len_list)
+        pscore = {
+            "independent": pscore_item_position,
+            "cascade": pscore_cascade,
+            "all": tiled_pscore_all,
+        }
+
+        if return_pscore["adaptive"]:
+            pscore_adaptive = []
+            for i, user_behavior in enumerate(user_behavior):
+                pscore_adaptive.append(pscore[user_behavior][i])
+            pscore_adaptive = np.array(pscore_adaptive)
+
+        else:
+            pscore_adaptive = None
+
+        pscore["adaptive"] = pscore_adaptive
+
+        if return_pscore["adaptive"] and return_pi:
+            raise NotImplementedError
+
+        if return_pi:
+            pi = {
+                "independent": marginal_pi_at_position,
+                "cascade": marginal_pi_cascade,
+                "all": ranking_pi,
+            }
+        else:
+            pi = None
+
+        return pi, pscore
 
 
 def mf_behavior_policy_logit(
@@ -315,7 +401,7 @@ def action_interaction_reward_function(
     action_context: np.ndarray,
     all_slate_action: np.ndarray,
     base_reward_function: Callable,
-    reward_structure: str,
+    user_behavior_to_index: dict,
     len_list: int,
     random_: np.random.RandomState,
 ) -> np.ndarray:
@@ -327,20 +413,39 @@ def action_interaction_reward_function(
     n_rounds = len(context)
 
     # shape: (n_rounds, n_slate, len_list)
+
     expected_reward = expected_reward_per_action[
         np.arange(n_rounds)[:, np.newaxis], all_slate_action[:, np.newaxis]
     ].transpose(1, 0, 2)
 
-    for pos_ in reversed(range(1, len_list)):
-        if reward_structure == "independent":
+    # shape: (n_rounds, n_user_behavior, n_slate, len_list)
+    expected_reward = np.tile(
+        expected_reward[:, np.newaxis, :, :],
+        reps=(1, len(user_behavior_to_index), 1, 1),
+    )
+
+    interaction_params = random_.normal(size=(len_list,))
+
+    expected_reward_fixed = expected_reward.copy()
+
+    for behavior, c in user_behavior_to_index.items():
+
+        if behavior == "independent":
             continue
 
-        elif reward_structure == "cascade":
-            expected_reward[:, :, pos_] *= (1 - expected_reward[:, :, :pos_]).prod(
-                axis=2
-            )
+        for pos_ in range(len_list):
+            if behavior == "cascade":
+                expected_reward_fixed[:, c, :, pos_] += (
+                    expected_reward[:, c, :, :pos_] * interaction_params[:pos_]
+                ).sum(axis=2)
 
-        else:
-            raise NotImplementedError
+            elif behavior == "all":
+                expected_reward_fixed[:, c, :, pos_] += (
+                    expected_reward[:, c, :, :pos_] * interaction_params[:pos_]
+                ).sum(axis=2)
+                expected_reward_fixed[:, c, :, pos_] += (
+                    expected_reward[:, c, :, pos_ + 1 :]
+                    * interaction_params[pos_ + 1 :]
+                ).sum(axis=2)
 
-    return expected_reward
+    return expected_reward_fixed
