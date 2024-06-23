@@ -4,7 +4,7 @@ import numpy as np
 def gen_eps_greedy(
     expected_reward: np.ndarray,
     is_optimal: bool = True,
-    eps: float = 0.0,
+    eps: float = 0.3,
 ) -> np.ndarray:
     "Generate an evaluation policy via the epsilon-greedy rule."
     base_pol = np.zeros_like(expected_reward)
