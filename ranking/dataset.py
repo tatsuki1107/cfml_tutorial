@@ -28,6 +28,7 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
     behavior_policy_function: Callable = None
     random_state: int = 12345
     reward_noise: float = 1.0
+    interaction_noise: float = 1.0
 
     def __post_init__(self) -> None:
         self.random_ = check_random_state(self.random_state)
@@ -44,6 +45,10 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         self.behavior_policy_function = mf_behavior_policy_logit
         self.base_reward_function = logistic_reward_function
         self.reward_function = action_interaction_reward_function
+        
+        self.interaction_params = self.random_.normal(
+            scale=self.interaction_noise, size=(self.len_list, self.len_list)
+        )
 
     def obtain_batch_bandit_feedback(
         self,
@@ -66,14 +71,14 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
 
         # \mathbb{a} ~ \pi_b(\mathbb{a} | x)
         sampled_slate_index = sample_action_fast(
-            action_dist=ranking_pi_b, random_state=self.random_state
+            action_dist=ranking_pi_b
         )
 
         slate_actions = self.all_slate_actions[sampled_slate_index]
 
         # \mathbb{c} ~ p(\mathbb{c} | x)
         user_behavior_idx, user_behavior = self._sample_user_behavior(
-            n_rounds=n_rounds, random_=self.random_
+            n_rounds=n_rounds
         )
 
         expected_reward = self.reward_function(
@@ -82,8 +87,8 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
             all_slate_action=self.all_slate_actions,
             base_reward_function=self.base_reward_function,
             user_behavior_to_index=self.user_behavior_to_index,
-            len_list=self.len_list,
-            random_=self.random_,
+            interaction_params=self.interaction_params,
+            random_state=self.random_state,
         )
 
         # \mathbb{r} ~ p(\mathbb{r} | x, \mathbb{a})
@@ -139,10 +144,10 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
         ).mean()
 
     def _sample_user_behavior(
-        self, n_rounds: int, random_: np.random.RandomState
+        self, n_rounds: int
     ) -> Tuple[np.ndarray, np.ndarray]:
         # sample context free behavior
-        user_behavior = random_.choice(
+        user_behavior = self.random_.choice(
             list(self.behavior_ratio.keys()),
             p=list(self.behavior_ratio.values()),
             size=n_rounds,
@@ -342,8 +347,11 @@ class SyntheticSlateBanditDataset(BaseBanditDataset):
 
 
 def mf_behavior_policy_logit(
-    context: np.ndarray, n_unique_action: int, random_state=12345, tau=1.0
-):
+    context: np.ndarray, 
+    n_unique_action: int, 
+    random_state: Optional[int] = None, 
+    tau: float = 1.0
+) -> np.ndarray:
     random_ = check_random_state(random_state)
     action_coef_ = random_.normal(size=(n_unique_action, context.shape[1]))
 
@@ -352,8 +360,9 @@ def mf_behavior_policy_logit(
 
 
 def sample_random_uniform_coefficients(
-    dim_context: int, dim_action_context: int, random_: np.random.RandomState
+    dim_context: int, dim_action_context: int, random_state: int
 ) -> Tuple[np.ndarray, ...]:
+    random_ = check_random_state(random_state)
     context_coef_ = random_.uniform(-1, 1, size=dim_context)
     action_coef_ = random_.uniform(-1, 1, size=dim_action_context)
     context_action_coef_ = random_.uniform(
@@ -366,7 +375,7 @@ def sample_random_uniform_coefficients(
 def logistic_reward_function(
     context: np.ndarray,
     action_context: np.ndarray,
-    random_: np.random.RandomState,
+    random_state: int,
     coef_function: Callable = sample_random_uniform_coefficients,
     degree: int = 1,
     z_score: bool = True,
@@ -379,7 +388,7 @@ def logistic_reward_function(
     n_action, dim_action_context = action_context_.shape
 
     context_coef_, action_coef_, context_action_coef_ = coef_function(
-        dim_context=dim_context, dim_action_context=dim_action_context, random_=random_
+        dim_context=dim_context, dim_action_context=dim_action_context, random_state=random_state
     )
 
     context_values = np.tile(context_ @ context_coef_, reps=(n_action, 1)).T
@@ -402,13 +411,13 @@ def action_interaction_reward_function(
     all_slate_action: np.ndarray,
     base_reward_function: Callable,
     user_behavior_to_index: dict,
-    len_list: int,
-    random_: np.random.RandomState,
+    interaction_params: np.ndarray,
+    random_state: int
 ) -> np.ndarray:
     expected_reward_per_action: np.ndarray = base_reward_function(
         context=context,
         action_context=action_context,
-        random_=random_,
+        random_state=random_state,
     )
     n_rounds = len(context)
 
@@ -424,8 +433,6 @@ def action_interaction_reward_function(
         reps=(1, len(user_behavior_to_index), 1, 1),
     )
 
-    interaction_params = random_.normal(size=(len_list,))
-
     expected_reward_fixed = expected_reward.copy()
 
     for behavior, c in user_behavior_to_index.items():
@@ -433,19 +440,19 @@ def action_interaction_reward_function(
         if behavior == "independent":
             continue
 
-        for pos_ in range(len_list):
+        for pos_ in range(len(interaction_params)):
             if behavior == "cascade":
                 expected_reward_fixed[:, c, :, pos_] += (
-                    expected_reward[:, c, :, :pos_] * interaction_params[:pos_]
+                    expected_reward[:, c, :, :pos_] * interaction_params[pos_, :pos_]
                 ).sum(axis=2)
 
             elif behavior == "all":
                 expected_reward_fixed[:, c, :, pos_] += (
-                    expected_reward[:, c, :, :pos_] * interaction_params[:pos_]
+                    expected_reward[:, c, :, :pos_] * interaction_params[pos_, :pos_]
                 ).sum(axis=2)
                 expected_reward_fixed[:, c, :, pos_] += (
                     expected_reward[:, c, :, pos_ + 1 :]
-                    * interaction_params[pos_ + 1 :]
+                    * interaction_params[pos_, pos_ + 1 :]
                 ).sum(axis=2)
 
     return expected_reward_fixed
