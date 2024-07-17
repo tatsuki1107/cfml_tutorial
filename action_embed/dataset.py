@@ -100,13 +100,15 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         pscore_dict = self.aggregate_propensity_score(
             pi=pi_b,
             action=action,
+            p_e_d_a=self.p_e_d_a[:, :, self.n_unobserved_cat_dim:],
             action_context=action_context,
         )
 
         return dict(
             context=context,
             action=action,
-            action_context=action_context,
+            p_e_d_a=self.p_e_d_a[:, :, self.n_unobserved_cat_dim:],
+            action_context=action_context[:, self.n_unobserved_cat_dim:],
             reward=reward,
             pscore=pscore_dict,
             expected_reward=q_x_a,
@@ -121,18 +123,19 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         self,
         pi: np.ndarray,
         action: np.ndarray,
+        p_e_d_a: np.ndarray,
         action_context: np.ndarray,
     ) -> Dict[str, np.ndarray]:
         
         rounds = np.arange(len(action_context))
         marginal_pscore = np.ones_like(rounds, dtype=float)
-        for d in range(self.n_cat_dim - self.n_unobserved_cat_dim):
+        for d in range(p_e_d_a.shape[-1]):
             
-            p_e_pi_d = pi @ self.p_e_d_a[:, :, d]
+            p_e_pi_d = pi @ p_e_d_a[:, :, d]
             marginal_pscore *= p_e_pi_d[rounds, action_context[:, d]]
         
         pscore = pi[rounds, action]
 
-        pscore_dict = dict(action=pscore, category=marginal_pscore)
+        pscore_dict = dict(action=pscore, category=marginal_pscore, pi=pi)
 
         return pscore_dict
