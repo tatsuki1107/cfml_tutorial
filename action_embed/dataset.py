@@ -1,12 +1,16 @@
 from abc import ABCMeta
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Tuple, Dict
+from typing import Dict, Optional
 
 import numpy as np
+import pandas as pd
 from sklearn.utils import check_random_state
+from sklearn.preprocessing import LabelEncoder
 from obp.utils import softmax, sample_action_fast
 from obp.dataset import linear_reward_function
+from obp.dataset import OpenBanditDataset
+from obp.types import BanditFeedback
 
 
 class BaseBanditDataset(metaclass=ABCMeta):
@@ -139,3 +143,64 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         pscore_dict = dict(action=pscore, category=marginal_pscore, pi=pi)
 
         return pscore_dict
+
+
+@dataclass
+class ModifiedOpenBanditDataset(OpenBanditDataset):
+    @property
+    def n_actions(self) -> int:
+        return int(self.action.max() + 1)
+    
+    def pre_process(self) -> None:
+        user_cols = self.data.columns.str.contains('user_feature')
+        self.context = pd.get_dummies(
+            self.data.loc[:, user_cols], drop_first=True
+        ).values
+        position = pd.DataFrame(self.position)
+        self.action_context = (
+            self.item_context.drop(columns=["item_id", "item_feature_0"], axis=1)
+            .apply(LabelEncoder().fit_transform)
+            .values
+        )
+        self.action_context = self.action_context[self.action]
+        self.action_context = np.c_[self.action_context, position]
+
+        self.action = self.position * self.n_actions + self.action
+        self.position = np.zeros_like(self.position)
+        self.pscore /= (self.position.max() + 1)
+    
+    def sample_bootstrap_bandit_feedback(
+        self,
+        sample_size: Optional[int] = None,
+        test_size: float = 0.3,
+        is_timeseries_split: bool = False,
+        random_state: Optional[int] = None,
+    ) -> BanditFeedback:
+
+        if is_timeseries_split:
+            bandit_feedback = self.obtain_batch_bandit_feedback(
+                test_size=test_size, is_timeseries_split=is_timeseries_split
+            )[0]
+        else:
+            bandit_feedback = self.obtain_batch_bandit_feedback(
+                test_size=test_size, is_timeseries_split=is_timeseries_split
+            )
+        n_rounds = bandit_feedback["n_rounds"]
+        if sample_size is None:
+            sample_size = bandit_feedback["n_rounds"]
+
+        random_ = check_random_state(random_state)
+        bootstrap_idx = random_.choice(
+            np.arange(n_rounds), size=sample_size, replace=True
+        )
+        for key_ in [
+            "action",
+            "position",
+            "reward",
+            "pscore",
+            "context",
+            "action_context",
+        ]:
+            bandit_feedback[key_] = bandit_feedback[key_][bootstrap_idx]
+        bandit_feedback["n_rounds"] = sample_size
+        return bandit_feedback
