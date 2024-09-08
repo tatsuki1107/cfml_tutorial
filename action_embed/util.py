@@ -1,74 +1,61 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from pandas import DataFrame
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
 
 from estimator import InversePropensityScore
+from estimator_tuning import BaseOffPolicyEstimatorWithTune
+from importance_weight import vanilla_weight
+from importance_weight import marginal_weight
+from importance_weight import estimated_marginal_weight
 
 
 @dataclass
 class ActionEmbedOffPolicyEvaluation:
     bandit_feedback: dict
     ope_estimators: List[InversePropensityScore]
-    estimator_to_pscore_dict: dict
+    ope_estimators_tune: Optional[List[BaseOffPolicyEstimatorWithTune]] = None
     
-    def _estimate_w_x_e(
-        self, 
-        pi_e: np.ndarray,
-        max_iter: int = 1000,
-        random_state: int = 12345,
-    ) -> None:
-        
-        encoder = OneHotEncoder(sparse=False, drop="first")
-        onehot_action_context = encoder.fit_transform(
-            self.bandit_feedback["action_context"]
-        )
-        x_e = np.c_[self.bandit_feedback["context"], onehot_action_context]
-        
-        pi_a_x_e_estimator = LogisticRegression(max_iter=max_iter, random_state=random_state)
-        pi_a_x_e_estimator.fit(x_e, self.bandit_feedback["action"])
+    def __post_init__(self) -> None:
+        self.estimator_names = set([estimator.estimator_name for estimator in self.ope_estimators])
 
+    def _create_estimator_inputs(self, action_dist: np.ndarray) -> dict:
         
-        w_x_a = pi_e / self.bandit_feedback["pscore"]["pi"]
-        pi_a_x_e_hat = np.zeros_like(w_x_a)
-        pi_a_x_e_hat[:, np.unique(self.bandit_feedback["action"])] = pi_a_x_e_estimator.predict_proba(x_e)
-        w_x_e_hat = (w_x_a * pi_a_x_e_hat).sum(axis=1)
         
-        return w_x_e_hat
-
-    def _create_estimator_inputs(
-        self,
-        evaluation_policy_pscore: dict,
-    ) -> dict:
+        if ("IPS" in self.estimator_names) or ("DR" in self.estimator_names):
+            w_x_a = vanilla_weight(data=self.bandit_feedback, action_dist=action_dist)
         
-        if "estimated_category" in set(self.estimator_to_pscore_dict.values()):
-            w_x_e_hat = self._estimate_w_x_e(pi_e=evaluation_policy_pscore["pi"])
+        if ("MIPS (true)" in self.estimator_names) or ("MDR (true)" in self.estimator_names):
+            w_x_e = marginal_weight(data=self.bandit_feedback, action_dist=action_dist)
+        
+        if ("MIPS" in self.estimator_names) or ("MDR" in self.estimator_names):
+            w_x_e_hat = estimated_marginal_weight(
+                data=self.bandit_feedback, 
+                action_dist=action_dist,
+                weight_estimator=RandomForestClassifier(n_estimators=10, max_depth=10)
+            )
 
         input_data = {}
-        for estimator_name, pscore_name in self.estimator_to_pscore_dict.items():
+        for estimator_name in self.estimator_names:
             input_data[estimator_name] = {"reward": self.bandit_feedback["reward"]}
             
-            if pscore_name == "estimated_category":
-                input_data[estimator_name]["weight"] = w_x_e_hat
-            else:
-                w_x_e = evaluation_policy_pscore[pscore_name] / self.bandit_feedback["pscore"][pscore_name]
+            if estimator_name in ["IPS", "DR"]:
+                input_data[estimator_name]["weight"] = w_x_a
+            elif estimator_name in ["MIPS (true)", "MDR (true)"]:
                 input_data[estimator_name]["weight"] = w_x_e
+            elif estimator_name in ["MIPS", "MDR"]:
+                input_data[estimator_name]["weight"] = w_x_e_hat
+
 
         return input_data
 
-    def estimate_policy_values(
-        self,
-        evaluation_policy_pscore: dict,
-    ) -> dict:
+    def estimate_policy_values(self, action_dist: np.ndarray) -> dict:
 
-        input_data = self._create_estimator_inputs(
-            evaluation_policy_pscore=evaluation_policy_pscore
-        )
+        input_data = self._create_estimator_inputs(action_dist=action_dist)
 
         estimated_policy_values = dict()
         for estimator in self.ope_estimators:
@@ -76,6 +63,14 @@ class ActionEmbedOffPolicyEvaluation:
                 **input_data[estimator.estimator_name]
             )
             estimated_policy_values[estimator.estimator_name] = estimated_policy_value
+        
+        if self.ope_estimators_tune is not None:
+            for estimator_tune in self.ope_estimators_tune:
+                estimated_policy_value = estimator_tune.estimate_policy_value_with_tune(
+                    bandit_feedback=self.bandit_feedback,
+                    action_dist=action_dist
+                )
+                estimated_policy_values[estimator_tune.estimator.estimator_name] = estimated_policy_value
 
         return estimated_policy_values
 
@@ -117,7 +112,13 @@ def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
 
     y = ["se", "bias", "variance"]
     title = ["mean squared error (MSE)", "Squared Bias", "Variance"]
-    palette = {"IPS": "tab:red", "MIPS (true)": "tab:orange", "MIPS": "tab:gray"}
+    palette = {
+        "IPS": "tab:red", 
+        "MIPS (true)": "tab:orange", 
+        "MIPS (true)-SLOPE": "tab:green",
+        "MIPS": "tab:gray", 
+        "AVG": "tab:blue"
+    }
 
     ylims = []
 
