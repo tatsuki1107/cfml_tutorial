@@ -134,16 +134,18 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
         self.context = pd.get_dummies(
             self.data.loc[:, user_cols], drop_first=True
         ).values
-        position = pd.DataFrame(self.position)
-        self.action_context = (
+        len_list_ = self.position.max() + 1
+        action_context = (
             self.item_context.drop(columns=["item_id", "item_feature_0"], axis=1)
             .apply(LabelEncoder().fit_transform)
             .values
         )
-        self.action_context = self.action_context[self.action]
-        self.action_context = np.c_[self.action_context, position]
-
+        
+        action_context = np.repeat(action_context, len_list_, axis=0)
+        tiled_position = np.tile(np.arange(len_list_), self.n_actions)
+        self.unique_action_context = np.c_[action_context, tiled_position]
         self.action = self.position * self.n_actions + self.action
+        self.action_context = self.unique_action_context[self.action]
         self.position = np.zeros_like(self.position)
         self.pscore /= self.position.max() + 1
 
@@ -180,7 +182,7 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
         ]:
             bandit_feedback[key_] = bandit_feedback[key_][bootstrap_idx]
         bandit_feedback["n_rounds"] = sample_size
-        bandit_feedback["action_context_type"] = "cateogrical"
+        bandit_feedback["unique_action_context"] = self.unique_action_context
         return bandit_feedback
 
 

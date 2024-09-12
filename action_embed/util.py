@@ -22,8 +22,13 @@ class ActionEmbedOffPolicyEvaluation:
     
     def __post_init__(self) -> None:
         self.estimator_names = set([estimator.estimator_name for estimator in self.ope_estimators])
+        self.is_model_dependent = False
+        
+        if any(name in self.estimator_names for name in ["DM", "DR"]):
+            self.is_model_dependent = True
 
-    def _create_estimator_inputs(self, action_dist: np.ndarray) -> dict:
+
+    def _create_estimator_inputs(self, action_dist: np.ndarray, estimated_rewards: Optional[np.ndarray] = None) -> dict:
         
         
         if ("IPS" in self.estimator_names) or ("DR" in self.estimator_names):
@@ -41,21 +46,37 @@ class ActionEmbedOffPolicyEvaluation:
 
         input_data = {}
         for estimator_name in self.estimator_names:
-            input_data[estimator_name] = {"reward": self.bandit_feedback["reward"]}
+            input_data_ = {}
+            # reward
+            input_data_["reward"] = self.bandit_feedback["reward"]
             
+            # weight
             if estimator_name in ["IPS", "DR"]:
-                input_data[estimator_name]["weight"] = w_x_a
+                input_data_["weight"] = w_x_a
             elif estimator_name in ["MIPS (true)", "MDR (true)"]:
-                input_data[estimator_name]["weight"] = w_x_e
+                input_data_["weight"] = w_x_e
             elif estimator_name in ["MIPS", "MDR"]:
-                input_data[estimator_name]["weight"] = w_x_e_hat
+                input_data_["weight"] = w_x_e_hat
+            
+            # estimated reward
+            if estimator_name == "DR":
+                input_data_["q_hat_factual"] = estimated_rewards[:, self.bandit_feedback["action"]]
+            
+            if estimator_name in ["DM", "DR"]:
+                input_data_["q_hat"] = estimated_rewards
+                input_data_["action_dist"] = action_dist
+            
+            input_data[estimator_name] = input_data_
 
 
         return input_data
 
-    def estimate_policy_values(self, action_dist: np.ndarray) -> dict:
+    def estimate_policy_values(self, action_dist: np.ndarray, estimated_rewards: Optional[np.ndarray] = None) -> dict:
+        
+        if (estimated_rewards is None) and self.is_model_dependent:
+            raise ValueError("estimated_rewards must be given")
 
-        input_data = self._create_estimator_inputs(action_dist=action_dist)
+        input_data = self._create_estimator_inputs(action_dist=action_dist, estimated_rewards=estimated_rewards)
 
         estimated_policy_values = dict()
         for estimator in self.ope_estimators:
@@ -113,7 +134,8 @@ def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
     y = ["se", "bias", "variance"]
     title = ["mean squared error (MSE)", "Squared Bias", "Variance"]
     palette = {
-        "IPS": "tab:red", 
+        "IPS": "tab:red",
+        "DR": "tab:blue",
         "MIPS (true)": "tab:orange", 
         "MIPS (true)-SLOPE": "tab:green",
         "MIPS": "tab:gray", 

@@ -16,14 +16,26 @@ def clipped_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
 
 
 def marginal_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
-    action_embed_dim = kwargs["action_embed_dim"] if "action_embed_dim" in kwargs else np.arange(data["p_e_d_a"].shape[-1])
-    p_e_a = []
-    for d in action_embed_dim:
-        p_e_a.append(data["p_e_d_a"][:, data["action_context"][:, d], d])
+    action_embed_dim = kwargs["action_embed_dim"] if "action_embed_dim" in kwargs else np.arange(data["action_context"].shape[-1])
     
-    p_e_a = np.array(p_e_a).T.prod(axis=2)
-    p_e_x_pi_e = (action_dist * p_e_a).sum(axis=1)
-    p_e_x_pi_b = (data["pi_b"] * p_e_a).sum(axis=1)
+    if "unique_action_context" in data:
+        mask_e_a_e = []
+        for e_a in data["unique_action_context"][:, action_embed_dim]:
+            mask_e_a_e.append(np.all(data["action_context"][:, action_embed_dim] == e_a, axis=1))
+        
+        mask_e_a_e = np.array(mask_e_a_e).T
+        p_e_x_pi_e = (action_dist * mask_e_a_e).sum(axis=1)
+        p_e_x_pi_b = (data["pi_b"] * mask_e_a_e).sum(axis=1)
+    else:
+        
+        p_e_a = []
+        for d in action_embed_dim:
+            p_e_a.append(data["p_e_d_a"][:, data["action_context"][:, d], d])
+        
+        p_e_a = np.array(p_e_a).T.prod(axis=2)
+        p_e_x_pi_e = (action_dist * p_e_a).sum(axis=1)
+        p_e_x_pi_b = (data["pi_b"] * p_e_a).sum(axis=1)
+
     w_x_e = p_e_x_pi_e / p_e_x_pi_b
     
     return w_x_e
