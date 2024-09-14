@@ -18,6 +18,7 @@ from obp.dataset import OpenBanditDataset
 from obp.dataset import BaseRealBanditDataset
 from obp.dataset import BaseBanditDataset
 
+from abstraction import AbstractionLearner
 from policy import gen_eps_greedy
 
 
@@ -212,7 +213,12 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
         self.pre_process()
 
         # train a classifier to define a logging policy
-        self.train_pi_b()
+        self._train_pi_b()
+    
+    @property
+    def n_actions(self) -> int:
+        return int(self.train_label.shape[1])
+
 
     def load_raw_data(self) -> None:
         self.train_feature, self.train_label = self._load_raw_data(
@@ -296,32 +302,13 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
             self.pca.fit_transform(self.test_feature)
         )
 
-        self.n_actions = all_label.shape[1]
-        self.user_context_index = self.random_.choice(
-            self.n_components, size=int(self.n_components / 2), replace=False
-        )
-        self.action_context_index = np.setdiff1d(
-            np.arange(self.n_components), self.user_context_index
-        )
-
-        self.train_user_contexts = self.train_contexts[
-            :, self.user_context_index
-        ].copy()
-        self.train_action_contexts = self.train_contexts[
-            :, self.action_context_index
-        ].copy()
-        self.test_user_contexts = self.test_contexts[:, self.user_context_index].copy()
-        self.test_action_contexts = self.test_contexts[
-            :, self.action_context_index
-        ].copy()
-
-    def train_pi_b(self, max_iter: int = 500, batch_size: int = 2000) -> None:
-        idx = self.random_.choice(self.n_train, size=batch_size, replace=False)
+    def _train_pi_b(self, max_iter: int = 500, batch_size: int = 2000) -> None:
+        idx = self.random_.choice(self.n_test, size=batch_size, replace=False)
         self.regressor = MultiOutputRegressor(
             Ridge(max_iter=max_iter, random_state=self.random_state)
         )
         self.regressor.fit(
-            self.train_user_contexts[idx], self.train_expected_rewards[idx]
+            self.test_contexts[idx], self.test_expected_rewards[idx]
         )
 
     def compute_pi_b(self, contexts: np.ndarray, beta: float = 1.0) -> np.ndarray:
@@ -331,8 +318,7 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
 
     def obtain_batch_bandit_feedback(self, n_rounds: int) -> dict:
         idx = self.random_.choice(self.n_train, size=n_rounds, replace=False)
-        contexts = self.train_user_contexts[idx]
-        action_contexts = self.train_action_contexts[idx]
+        contexts = self.train_contexts[idx]
 
         pi_b = self.compute_pi_b(contexts)
         # a ~ \pi_b(\cdot|x)
@@ -342,20 +328,17 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
         # r ~ p(r|x,a,e)
         rewards = self.random_.binomial(n=1, p=q_x_a_e_factual)
 
-        pscores = dict(action=pi_b[:, actions], pi=pi_b)
-
         return dict(
             context=contexts,
             action=actions,
             reward=rewards,
-            pscore=pscores,
-            action_context=action_contexts,
+            pscore=pi_b[:, actions],
             expected_reward=self.train_expected_rewards[idx],
-            action_context_type="continuous",  # continuous or categorical
+            pi_b=pi_b,
         )
 
     @staticmethod
     def calc_ground_truth_policy_value(
-        expected_reward: np.ndarray, evaluation_policy: np.ndarray
+        expected_reward: np.ndarray, action_dist: np.ndarray
     ) -> np.float64:
-        return np.average(expected_reward, weights=evaluation_policy, axis=1).mean()
+        return np.average(expected_reward, weights=action_dist, axis=1).mean()
