@@ -125,6 +125,15 @@ def aggregate_simulation_results(
 
     return result_df
 
+PALETTE = {
+        "IPS": "tab:red",
+        "DR": "tab:blue",
+        "MIPS (true)": "tab:orange", 
+        "MIPS (true)-SLOPE": "tab:green",
+        "MIPS": "tab:gray", 
+        "AVG": "tab:blue"
+}
+
 
 def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
 
@@ -133,14 +142,6 @@ def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
 
     y = ["se", "bias", "variance"]
     title = ["mean squared error (MSE)", "Squared Bias", "Variance"]
-    palette = {
-        "IPS": "tab:red",
-        "DR": "tab:blue",
-        "MIPS (true)": "tab:orange", 
-        "MIPS (true)-SLOPE": "tab:green",
-        "MIPS": "tab:gray", 
-        "AVG": "tab:blue"
-    }
 
     ylims = []
 
@@ -155,7 +156,7 @@ def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
             ci=None,
             markersize=20,
             ax=ax_,
-            palette=palette,
+            palette=PALETTE,
         )
 
         # title
@@ -175,3 +176,30 @@ def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
 
     plt.tight_layout()
     plt.show()
+
+
+def visualize_cdf_of_ralative_error(rel_result_df: DataFrame, baseline: str = "IPS") -> None:
+    baseline_se = rel_result_df[rel_result_df['estimator'] == baseline].set_index('index')['se']
+    rel_result_df['baseline_se'] = rel_result_df['index'].map(baseline_se)
+    rel_result_df['rel_se'] = rel_result_df['se'] / rel_result_df['baseline_se']
+    rel_result_df = rel_result_df[['estimator', 'rel_se']]
+    fig, ax = plt.subplots(figsize=(12, 7), tight_layout=True)
+    sns.ecdfplot(
+        linewidth=4,
+        palette=PALETTE,
+        data=rel_result_df,
+        x="rel_se",
+        hue="estimator",
+        ax=ax,
+    )
+
+    # yaxis
+    ax.set_ylabel("probability", fontsize=25)
+    ax.set_ylim([0,1.1])
+    ax.tick_params(axis="y", labelsize=18)
+    ax.yaxis.set_label_coords(-0.08, 0.5)
+    # xaxis
+    ax.set_xscale("log")
+    ax.set_xlabel(f"relative squared errors w.r.t. {baseline}", fontsize=25)
+    ax.tick_params(axis="x", labelsize=18)
+    ax.xaxis.set_label_coords(0.5, -0.1)

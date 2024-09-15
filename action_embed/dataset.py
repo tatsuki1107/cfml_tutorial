@@ -18,7 +18,6 @@ from obp.dataset import OpenBanditDataset
 from obp.dataset import BaseRealBanditDataset
 from obp.dataset import BaseBanditDataset
 
-from abstraction import AbstractionLearner
 from policy import gen_eps_greedy
 
 
@@ -194,9 +193,9 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
 @dataclass
 class ExtremeBanditDataset(BaseRealBanditDataset):
     n_components: int = 100
-    reward_std: float = 1.0
+    reward_std: float = 3.0
     max_reward_noise: float = 0.2
-    dataset_name: str = "EUR-Lex4K"  # EUR-Lex4K or Wiki10-31K
+    dataset_name: str = "EUR-Lex4K"  # EUR-Lex4K or "RCV1-2K"
     random_state: int = 12345
 
     def __post_init__(self):
@@ -205,12 +204,16 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
         self.sc = StandardScaler()
         if self.dataset_name == "EUR-Lex4K":
             self.min_label_frequency = 1
-        elif self.dataset_name == "Wiki10-31K":
-            self.min_label_frequency = 9
+            self.train_size, self.test_size = None, None
+        elif self.dataset_name == "RCV1-2K":
+            self.min_label_frequency = 1
+            self.train_size, self.test_size = 15000, 4000
         self.random_ = check_random_state(self.random_state)
 
         self.load_raw_data()
+        print("done load raw data")
         self.pre_process()
+        print("done pre process")
 
         # train a classifier to define a logging policy
         self._train_pi_b()
@@ -222,20 +225,17 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
 
     def load_raw_data(self) -> None:
         self.train_feature, self.train_label = self._load_raw_data(
-            file_path=self.data_path / "train.txt"
+            file_path=self.data_path / "train.txt", data_size=self.train_size
         )
         self.test_feature, self.test_label = self._load_raw_data(
-            self.data_path / "test.txt"
+            file_path=self.data_path / "test.txt", data_size=self.test_size
         )
 
-    def _load_raw_data(self, file_path: PosixPath) -> tuple[np.ndarray, ...]:
+    def _load_raw_data(self, file_path: PosixPath, data_size: Optional[int] = None) -> tuple[np.ndarray, ...]:
         with open(file_path, "r") as file:
             num_data, num_feature, num_label = file.readline().split()
-            num_data, num_feature, num_label = (
-                int(num_data),
-                int(num_feature),
-                int(num_label),
-            )
+            num_data = int(num_data) if data_size is None else data_size
+            num_feature, num_label = int(num_feature), int(num_label)
 
             feature, label = [], []
             for _ in range(num_data):
@@ -245,62 +245,35 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
                 feature_ = [float(x.split(":")[1]) for x in data_[1:]]
 
                 label.append(
-                    sp.csr_matrix(
-                        ([1.0] * len(label_), label_, [0, len(label_)]),
-                        shape=(1, num_label),
-                    )
+                    sp.csr_matrix(([1.0] * len(label_), label_, [0, len(label_)]), shape=(1, num_label))
                 )
                 feature.append(
-                    sp.csr_matrix(
-                        (feature_, feature_index, [0, len(feature_)]),
-                        shape=(1, num_feature),
-                    )
+                    sp.csr_matrix((feature_, feature_index, [0, len(feature_)]), shape=(1, num_feature))
                 )
 
         return sp.vstack(feature).toarray(), sp.vstack(label).toarray()
 
     def pre_process(self) -> None:
-        self.n_train, self.n_test = (
-            self.train_feature.shape[0],
-            self.test_feature.shape[0],
-        )
+        self.n_train, self.n_test = self.train_feature.shape[0], self.test_feature.shape[0]
 
         # delete some rare actions
-        all_label = (
-            sp.vstack([self.train_label, self.test_label]).astype(np.int8).toarray()
-        )
+        all_label = sp.vstack([self.train_label, self.test_label]).astype(np.int8).toarray()
         idx = all_label.sum(axis=0) >= self.min_label_frequency
         all_label = all_label[:, idx]
 
         # generate reward_noise (depends on each action)
         self.eta = self.random_.uniform(self.max_reward_noise, size=all_label.shape[1])
 
-        self.train_label = sp.csr_matrix(
-            all_label[: self.n_train], dtype=np.float32
-        ).toarray()
-        self.train_expected_rewards = sigmoid(
-            x=(
-                self.train_label * (1 - self.eta)
-                + (1 - self.train_label) * (self.eta - 1)
-            )
-        )
+        self.train_label = sp.csr_matrix(all_label[: self.n_train], dtype=np.float32).toarray()
+        logits = self.train_label * (1 - self.eta) + (1 - self.train_label) * (self.eta - 1)
+        self.train_expected_rewards = sigmoid(x=logits)
 
-        self.test_label = sp.csr_matrix(
-            all_label[self.n_train :], dtype=np.float32
-        ).toarray()
-        self.test_expected_rewards = sigmoid(
-            x=(
-                self.test_label * (1 - self.eta)
-                + (1 - self.test_label) * (self.eta - 1)
-            )
-        )
+        self.test_label = sp.csr_matrix(all_label[self.n_train :], dtype=np.float32).toarray()
+        logits = self.test_label * (1 - self.eta) + (1 - self.test_label) * (self.eta - 1)
+        self.test_expected_rewards = sigmoid(x=logits)
 
-        self.train_contexts = self.sc.fit_transform(
-            self.pca.fit_transform(self.train_feature)
-        )
-        self.test_contexts = self.sc.fit_transform(
-            self.pca.fit_transform(self.test_feature)
-        )
+        self.train_contexts = self.sc.fit_transform(self.pca.fit_transform(self.train_feature))
+        self.test_contexts = self.sc.fit_transform(self.pca.fit_transform(self.test_feature))
 
     def _train_pi_b(self, max_iter: int = 500, batch_size: int = 2000) -> None:
         idx = self.random_.choice(self.n_test, size=batch_size, replace=False)
@@ -326,7 +299,7 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
 
         q_x_a_e_factual = self.train_expected_rewards[idx, actions]
         # r ~ p(r|x,a,e)
-        rewards = self.random_.binomial(n=1, p=q_x_a_e_factual)
+        rewards = self.random_.normal(loc=q_x_a_e_factual, scale=self.reward_std)
 
         return dict(
             context=contexts,
