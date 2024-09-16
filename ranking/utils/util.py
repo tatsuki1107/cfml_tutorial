@@ -1,55 +1,6 @@
-from dataclasses import dataclass
-from typing import List
-
-import numpy as np
 from pandas import DataFrame
 import matplotlib.pyplot as plt
 import seaborn as sns
-
-from estimator import SlateInversePropensityScore
-
-
-@dataclass
-class SlateOffPolicyEvaluation:
-    bandit_feedback: dict
-    ope_estimators: List[SlateInversePropensityScore]
-    estimator_to_pscore_dict: dict
-
-    def _create_estimator_inputs(
-        self,
-        alpha: np.ndarray,
-        evaluation_policy_pscore: dict,
-    ) -> dict:
-
-        input_data = {}
-        for estimator_name, pscore_name in self.estimator_to_pscore_dict.items():
-            input_data[estimator_name] = {
-                "reward": self.bandit_feedback["reward"],
-                "alpha": alpha,
-                "behavior_policy_pscore": self.bandit_feedback["pscore"][pscore_name],
-                "evaluation_policy_pscore": evaluation_policy_pscore[pscore_name],
-            }
-
-        return input_data
-
-    def estimate_policy_values(
-        self,
-        alpha: np.ndarray,
-        evaluation_policy_pscore: dict,
-    ) -> dict:
-
-        input_data = self._create_estimator_inputs(
-            alpha=alpha, evaluation_policy_pscore=evaluation_policy_pscore
-        )
-
-        estimated_policy_values = dict()
-        for estimator in self.ope_estimators:
-            estimated_policy_value = estimator.estimate_policy_value(
-                **input_data[estimator.estimator_name]
-            )
-            estimated_policy_values[estimator.estimator_name] = estimated_policy_value
-
-        return estimated_policy_values
 
 
 def aggregate_simulation_results(
@@ -71,7 +22,6 @@ def aggregate_simulation_results(
         result_df.groupby("estimator").agg({"value": "mean"})["value"].to_dict()
     )
     for estimator_name, expected_value in expected_values.items():
-
         row = result_df["estimator"] == estimator_name
 
         result_df.loc[row, "bias"] = (policy_value - expected_value) ** 2
@@ -83,7 +33,6 @@ def aggregate_simulation_results(
 
 
 def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
-
     plt.style.use("ggplot")
     fig, axes = plt.subplots(1, 3, figsize=(22, 6))
 
@@ -93,7 +42,6 @@ def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
     ylims = []
 
     for ax_, y_, title_ in zip(axes, y, title):
-
         sns.lineplot(
             data=result_df,
             x="x",
