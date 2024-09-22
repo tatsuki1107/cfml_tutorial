@@ -1,13 +1,16 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from sklearn.utils import check_random_state
 from obp.utils import softmax
+from obp.utils import sample_action_fast
 from obp.dataset import BaseBanditDataset
 from obp.dataset import logistic_reward_function
 
 from utils.policy import gen_eps_greedy
 from utils.sampling import sample_ranking_fast_with_replacement
+from utils.user_behavior import create_interaction_params
 
 
 @dataclass
@@ -15,21 +18,25 @@ class SyntheticRankingBanditDataset(BaseBanditDataset):
     n_actions_at_k: int
     len_list: int
     dim_context: int
-    behavior_ratio: dict
+    behavior_params: dict
     beta: float
     eps: float
     is_replacement: bool = True
     random_state: int = 12345
     reward_noise: float = 1.0
     interaction_noise: float = 1.0
+    delta: float = 1.0
 
     def __post_init__(self) -> None:
         self.random_ = check_random_state(self.random_state)
         self.n_actions = self.n_actions_at_k * self.len_list
         self.action_context = np.eye(self.n_actions, dtype=int)
 
-        self.interaction_params = self.random_.uniform(
-            0.0, self.interaction_noise, size=(self.len_list, self.len_list)
+        self.interaction_params = create_interaction_params(
+            behavior_names=list(self.behavior_params.keys()),
+            len_list=self.len_list,
+            interaction_noise=self.interaction_noise,
+            random_state=self.random_state,
         )
 
         if self.is_replacement:
@@ -38,6 +45,15 @@ class SyntheticRankingBanditDataset(BaseBanditDataset):
             )
         else:
             raise NotImplementedError
+
+        if len(self.behavior_params) > 1:
+            self.gamma_z = np.array(list(self.behavior_params.values()))
+        else:
+            self.gamma_z = None
+
+        self.id2user_behavior = {
+            i: c for i, (c, _) in enumerate(self.behavior_params.items())
+        }
 
     def obtain_batch_bandit_feedback(
         self, n_rounds: int, is_online: bool = False
@@ -76,11 +92,14 @@ class SyntheticRankingBanditDataset(BaseBanditDataset):
             raise NotImplementedError
 
         # c ~ p(c|x)
-        user_behavior = self.random_.choice(
-            list(self.behavior_ratio.keys()),
-            p=list(self.behavior_ratio.values()),
-            size=n_rounds,
+        p_c_x = linear_user_behavior_model(
+            context=context,
+            gamma_z=self.gamma_z,
+            delta=self.delta,
+            random_state=self.random_state,
         )
+        user_behavior_id = sample_action_fast(p_c_x)
+        user_behavior = np.array([self.id2user_behavior[i] for i in user_behavior_id])
 
         rounds = np.arange(n_rounds)[:, None]
         base_expected_reward_factual = q_x_a[rounds, rankings].copy()
@@ -138,39 +157,42 @@ class SyntheticRankingBanditDataset(BaseBanditDataset):
 def action_interaction_reward_function(
     base_expected_reward_factual: np.ndarray,
     user_behavior: np.ndarray,
-    interaction_params: np.ndarray,
+    interaction_params: dict[str, np.ndarray],
 ) -> np.ndarray:
-    position = np.arange(len(interaction_params))
-    len_list = len(interaction_params)
+    len_list = base_expected_reward_factual.shape[1]
 
-    expected_reward_factual_fixed = base_expected_reward_factual.copy()
-    expected_reward_factual_fixed /= len_list
-
-    for behavior in np.unique(user_behavior):
-        c = user_behavior == behavior
-
-        if behavior == "independent":
-            continue
+    expected_reward_factual_fixed = np.zeros_like(base_expected_reward_factual)
+    for behavior_name in np.unique(user_behavior):
+        behavior_mask = user_behavior == behavior_name
 
         for pos_ in range(len_list):
-            if behavior == "cascade":
-                expected_reward_factual_fixed[c, pos_] += (
-                    interaction_params[pos_, :pos_]
-                    * expected_reward_factual_fixed[c, :pos_]
-                    / np.abs(position[:pos_] - pos_)
-                ).sum(axis=1)
-            elif behavior == "standard":
-                expected_reward_factual_fixed[c, pos_] += (
-                    interaction_params[pos_, :pos_]
-                    * expected_reward_factual_fixed[c, :pos_]
-                    / np.abs(position[:pos_] - pos_)
-                ).sum(axis=1)
-                expected_reward_factual_fixed[c, pos_] += (
-                    interaction_params[pos_, pos_ + 1 :]
-                    * expected_reward_factual_fixed[c, pos_ + 1 :]
-                    / np.abs(position[pos_ + 1 :] - pos_)
-                ).sum(axis=1)
-            else:
-                raise NotImplementedError
+            q_x_a_k_fixed = (
+                interaction_params[behavior_name][pos_]
+                * base_expected_reward_factual[behavior_mask]
+            ).sum(1)
+            expected_reward_factual_fixed[behavior_mask, pos_] = q_x_a_k_fixed
 
     return expected_reward_factual_fixed
+
+
+def linear_user_behavior_model(
+    context: np.ndarray,
+    gamma_z: Optional[np.ndarray],
+    delta: float = 1.0,
+    random_state: Optional[int] = None,
+) -> np.ndarray:
+    if gamma_z is None:
+        n_rounds = len(context)
+        p_c_x = np.ones((n_rounds, 1))
+    else:
+        random_ = check_random_state(random_state)
+        n_behavior_model, dim_context = len(gamma_z), context.shape[1]
+        user_behavior_coef = random_.uniform(
+            -1, 1, size=(dim_context, n_behavior_model)
+        )
+
+        behavior_logits = np.abs(context @ user_behavior_coef)
+        lambda_z = np.exp((2 * delta - 1) * gamma_z)
+        p_c_x = softmax(lambda_z * behavior_logits)
+
+    return p_c_x

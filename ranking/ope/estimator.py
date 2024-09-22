@@ -11,7 +11,14 @@ class InversePropensityScore(BaseOffPolicyEstimator):
     estimator_name: str
 
     def __post_init__(self) -> None:
-        if not self.estimator_name in {"SIPS", "IIPS", "RIPS", "AIPS (true)", "AIPS"}:
+        if not self.estimator_name in {
+            "SIPS",
+            "IIPS",
+            "RIPS",
+            "AIPS (true)",
+            "AIPS - tree",
+            "AIPS - ur",
+        }:
             raise ValueError
 
     def _estimate_round_rewards(
@@ -33,6 +40,11 @@ class InversePropensityScore(BaseOffPolicyEstimator):
         return self._estimate_round_rewards(
             reward=reward, alpha=alpha, weight=weight
         ).mean()
+
+    def estimate_position_wise_policy_value(
+        self, reward: np.ndarray, alpha: np.ndarray, weight: np.ndarray
+    ) -> np.float64:
+        return (weight * alpha * reward).mean(0)
 
     def estimate_interval(self):
         pass

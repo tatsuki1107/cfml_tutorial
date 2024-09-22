@@ -4,17 +4,18 @@ from typing import List, Optional
 import numpy as np
 
 from ope.estimator import InversePropensityScore
-from ope.impotance_weight import vanilla_weight
-from ope.impotance_weight import independent_weight
-from ope.impotance_weight import cascade_weight
-from ope.impotance_weight import adaptive_weight
+from ope.estimator_tuning import UserBehaviorTree
+from ope.importance_weight import vanilla_weight
+from ope.importance_weight import independent_weight
+from ope.importance_weight import cascade_weight
+from ope.importance_weight import adaptive_weight
 
 
 @dataclass
 class RankingOffPolicyEvaluation:
     bandit_feedback: dict
     ope_estimators: List[InversePropensityScore]
-    ope_estimators_tune: Optional[List[InversePropensityScore]] = None
+    ope_estimators_tune: Optional[List[UserBehaviorTree]] = None
     alpha: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
@@ -52,6 +53,13 @@ class RankingOffPolicyEvaluation:
                 weight = adaptive_weight(
                     data=self.bandit_feedback, action_dist=action_dist
                 )
+            elif estimator_name == "AIPS":
+                kwargs_ = dict(
+                    user_behavior=self.bandit_feedback["estimated_user_behavior"]
+                )
+                weight = adaptive_weight(
+                    data=self.bandit_feedback, action_dist=action_dist, **kwargs_
+                )
 
             input_data_["weight"] = weight
             input_data_["alpha"] = self.alpha
@@ -70,6 +78,12 @@ class RankingOffPolicyEvaluation:
             estimated_policy_values[estimator.estimator_name] = estimated_policy_value
 
         if self.ope_estimators_tune:
-            raise NotImplementedError
+            for estimator_tune in self.ope_estimators_tune:
+                estimated_policy_value = estimator_tune.estimate_policy_value_with_tune(
+                    data=self.bandit_feedback, action_dist=action_dist
+                )
+                estimated_policy_values[
+                    estimator_tune.estimator.estimator_name
+                ] = estimated_policy_value
 
         return estimated_policy_values

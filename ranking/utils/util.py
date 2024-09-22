@@ -32,10 +32,22 @@ def aggregate_simulation_results(
     return result_df
 
 
+PELETTE = {
+    "SIPS": "tab:red",
+    "IIPS": "tab:blue",
+    "RIPS": "tab:purple",
+    "AIPS (true)": "tab:gray",
+    "AIPS - tree": "tab:green",
+    "AIPS - ur": "tab:green",
+}
+
+
 def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
     plt.style.use("ggplot")
     fig, axes = plt.subplots(1, 3, figsize=(22, 6))
 
+    estimators = result_df["estimator"].unique()
+    palettes = {estimator: PELETTE[estimator] for estimator in estimators}
     y = ["se", "bias", "variance"]
     title = ["mean squared error (MSE)", "Squared Bias", "Variance"]
 
@@ -47,6 +59,7 @@ def visualize_mean_squared_error(result_df: DataFrame, xlabel: str) -> None:
             x="x",
             y=y_,
             hue="estimator",
+            palette=palettes,
             marker="o",
             ci=None,
             markersize=20,
