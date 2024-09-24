@@ -13,6 +13,7 @@ from ope.estimator import InversePropensityScore
 from ope.importance_weight import vanilla_weight
 from ope.importance_weight import adaptive_weight
 from utils.policy import gen_eps_greedy
+from utils.user_behavior import parse_behavior
 
 
 @dataclass
@@ -402,7 +403,7 @@ class UserBehaviorTree(BaseOfflineEstimatorWithSurrogateMSE):
         self.train_size = len(data["context"])
         self._create_bootstrap_dataset()
 
-        self.train_importance_weight_dict = self._compute_importance_weight(
+        self.train_importance_weight_dict = self._compute_initialized_importance_weight(
             data=data, action_dist=action_dist
         )
         self.train_context = data["context"]
@@ -419,7 +420,7 @@ class UserBehaviorTree(BaseOfflineEstimatorWithSurrogateMSE):
             policy_logit_ = bootstrap_data_["evaluation_policy_logit"]
             action_dist_ = gen_eps_greedy(expected_reward=policy_logit_, eps=self.eps)
 
-            importance_weight_dict_ = self._compute_importance_weight(
+            importance_weight_dict_ = self._compute_initialized_importance_weight(
                 data=bootstrap_data_, action_dist=action_dist_
             )
 
@@ -433,11 +434,17 @@ class UserBehaviorTree(BaseOfflineEstimatorWithSurrogateMSE):
                 )
             )
 
-    def _compute_importance_weight(self, data: dict, action_dist: np.ndarray) -> dict:
+    def _compute_initialized_importance_weight(
+        self, data: dict, action_dist: np.ndarray
+    ) -> dict:
         importance_weight_dict = dict()
         for user_behavior_id, weight_func in self.candidate_models.items():
-            importance_weight_dict[user_behavior_id] = weight_func(
-                data=data, action_dist=action_dist
-            )
+            input_data = dict(data=data, action_dist=action_dist)
+            parsed_behavior = parse_behavior(self.id2behavior[user_behavior_id])
+            if parsed_behavior:
+                _, k = parsed_behavior
+                input_data["k"] = k
+
+            importance_weight_dict[user_behavior_id] = weight_func(**input_data)
 
         return importance_weight_dict

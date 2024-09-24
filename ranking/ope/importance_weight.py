@@ -1,9 +1,16 @@
+from typing import Optional
+
 import numpy as np
 
+from utils.user_behavior import parse_behavior
 
-def vanilla_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
+
+def vanilla_weight(
+    data: dict, action_dist: np.ndarray, user_idx: Optional[np.ndarray] = None, **kwargs
+) -> np.ndarray:
     rounds = np.arange(data["n_rounds"])
-    user_idx = kwargs["user_idx"] if "user_idx" in kwargs else rounds
+    if user_idx is None:
+        user_idx = rounds
 
     if data["is_replacement"]:
         position = np.arange(data["len_list"])[None, :]
@@ -20,9 +27,12 @@ def vanilla_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
     return ranking_wise_weight[user_idx]
 
 
-def independent_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
+def independent_weight(
+    data: dict, action_dist: np.ndarray, user_idx: Optional[np.ndarray] = None, **kwargs
+) -> np.ndarray:
     rounds = np.arange(data["n_rounds"])
-    user_idx = kwargs["user_idx"] if "user_idx" in kwargs else rounds
+    if user_idx is None:
+        user_idx = rounds
 
     if data["is_replacement"]:
         position = np.arange(data["len_list"])[None, :]
@@ -36,9 +46,12 @@ def independent_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndar
     return position_wise_weight[user_idx]
 
 
-def cascade_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
+def cascade_weight(
+    data: dict, action_dist: np.ndarray, user_idx: Optional[np.ndarray] = None, **kwargs
+) -> np.ndarray:
     rounds = np.arange(data["n_rounds"])
-    user_idx = kwargs["user_idx"] if "user_idx" in kwargs else rounds
+    if user_idx is None:
+        user_idx = rounds
 
     if data["is_replacement"]:
         position = np.arange(data["len_list"])[None, :]
@@ -59,9 +72,12 @@ def cascade_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
     return cascade_iw[user_idx]
 
 
-def inverse_cascade_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
+def inverse_cascade_weight(
+    data: dict, action_dist: np.ndarray, user_idx: Optional[np.ndarray] = None, **kwargs
+) -> np.ndarray:
     rounds = np.arange(data["n_rounds"])
-    user_idx = kwargs["user_idx"] if "user_idx" in kwargs else rounds
+    if user_idx is None:
+        user_idx = rounds
 
     if data["is_replacement"]:
         position = np.arange(data["len_list"])[None, :]
@@ -83,10 +99,15 @@ def inverse_cascade_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.
 
 
 def top_k_cascade_weight(
-    data: dict, action_dist: np.ndarray, k: int, **kwargs
+    data: dict,
+    action_dist: np.ndarray,
+    k: int,
+    user_idx: Optional[np.ndarray] = None,
+    **kwargs,
 ) -> np.ndarray:
     rounds = np.arange(data["n_rounds"])
-    user_idx = kwargs["user_idx"] if "user_idx" in kwargs else rounds
+    if user_idx is None:
+        user_idx = rounds
 
     if data["is_replacement"]:
         position = np.arange(data["len_list"])[None, :]
@@ -112,10 +133,15 @@ def top_k_cascade_weight(
 
 
 def neighbor_k_weight(
-    data: dict, action_dist: np.ndarray, k: int, **kwargs
+    data: dict,
+    action_dist: np.ndarray,
+    k: int,
+    user_idx: Optional[np.ndarray] = None,
+    **kwargs,
 ) -> np.ndarray:
     rounds = np.arange(data["n_rounds"])
-    user_idx = kwargs["user_idx"] if "user_idx" in kwargs else rounds
+    if user_idx is None:
+        user_idx = rounds
 
     if data["is_replacement"]:
         position = np.arange(data["len_list"])[None, :]
@@ -142,6 +168,16 @@ def neighbor_k_weight(
     return neighbor_k_iw[user_idx]
 
 
+CANDIDATE_WEIGHT_FUNC_DICT = {
+    "standard": vanilla_weight,
+    "independent": independent_weight,
+    "cascade": cascade_weight,
+    "inverse_cascade": inverse_cascade_weight,
+    "top_k_cascade": top_k_cascade_weight,
+    "neighbor_k": neighbor_k_weight,
+}
+
+
 def adaptive_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
     user_behavior = (
         kwargs["estimated_user_behavior"]
@@ -149,27 +185,25 @@ def adaptive_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray
         else data["user_behavior"]
     )
 
-    weight_func_dict = {
-        "standard": vanilla_weight,
-        "independent": independent_weight,
-        "cascade": cascade_weight,
-    }
     adaptive_weight = np.zeros_like(data["action"], dtype=float)
-    for behavior_, weight_func in weight_func_dict.items():
-        behavior_mask = user_behavior == behavior_
-        if np.any(behavior_mask):
-            kwargs = dict(user_idx=behavior_mask)
-            weight_ = weight_func(data=data, action_dist=action_dist, **kwargs)
-            adaptive_weight[behavior_mask] = weight_
+    for behavior_name in np.unique(user_behavior):
+        behavior_mask = user_behavior == behavior_name
+        parsed_behavior = parse_behavior(behavior_name)
+        if parsed_behavior:
+            behavior_name_, k_ = parsed_behavior
+            weight_func = CANDIDATE_WEIGHT_FUNC_DICT[behavior_name_]
+            weight_ = weight_func(
+                data=data, action_dist=action_dist, user_idx=behavior_mask, k=k_
+            )
+        else:
+            weight_func = CANDIDATE_WEIGHT_FUNC_DICT[behavior_name]
+            weight_ = weight_func(
+                data=data, action_dist=action_dist, user_idx=behavior_mask
+            )
+
+        adaptive_weight[behavior_mask] = weight_
 
     return adaptive_weight
-
-
-def top_k_cascade_weight(
-    data: dict, action_dist: np.ndarray, k: int, **kwargs
-) -> np.ndarray:
-    rounds = np.arange(data["n_rounds"])
-    user_idx = kwargs["user_idx"] if "user_idx" in kwargs else rounds
 
 
 def _compute_position_wise_weight(args):
