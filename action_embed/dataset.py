@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from pathlib import PosixPath
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -18,8 +18,6 @@ from obp.dataset import OpenBanditDataset
 from obp.dataset import BaseRealBanditDataset
 from obp.dataset import BaseBanditDataset
 
-from policy import gen_eps_greedy
-
 
 @dataclass
 class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
@@ -30,10 +28,10 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
     latent_param_mat_dim: int
     n_unobserved_cat_dim: int = 0
     p_e_a_param_std: float = 1.0
+    is_probabilistic_embed: bool = True
     reward_noise: float = 1.0
-    beta: float = -3.0
+    beta: float = -1.0
     random_state: int = 12345
-    eps: float = 0.3
 
     def __post_init__(self) -> None:
         self.random_ = check_random_state(self.random_state)
@@ -47,6 +45,10 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
                 size=(self.n_actions, self.n_cat_per_dim, self.n_cat_dim),
             )
         )
+        if not self.is_probabilistic_embed:
+            p_e_d_a_ = np.zeros((self.n_actions, self.n_cat_per_dim, self.n_cat_dim))
+            p_e_d_a_[np.arange(self.n_actions)[:, None], self.p_e_d_a.argmax(1)] = 1.
+            self.p_e_d_a = p_e_d_a_
 
         self.latent_cat_param = self.random_.normal(
             size=(self.n_cat_dim, self.n_cat_per_dim, self.latent_param_mat_dim)
@@ -58,7 +60,7 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         )
 
     def obtain_batch_bandit_feedback(
-        self, n_rounds: int, is_online: bool = False
+        self, n_rounds: int,
     ) -> dict:
         # x ~ p(x)
         context = self.random_.normal(size=(n_rounds, self.dim_context))
@@ -76,14 +78,18 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
             q_x_a.append(q_x_a_d)
             q_x_e.append(q_x_e_d)
 
-        q_x_a = np.array(q_x_a).transpose(1, 2, 0)  # shape: (n_rounds, n_actions, n_cat_dim)
-        q_x_e = np.array(q_x_e).transpose(1, 0, 2)  # shape: (n_rounds, n_cat_dim, n_cat_per_dim)
+        q_x_a = np.array(q_x_a).transpose(
+            1, 2, 0
+        )  # shape: (n_rounds, n_actions, n_cat_dim)
+        q_x_e = np.array(q_x_e).transpose(
+            1, 0, 2
+        )  # shape: (n_rounds, n_cat_dim, n_cat_per_dim)
 
         cat_dim_importance_ = self.cat_dim_importance.reshape((1, 1, self.n_cat_dim))
         # shape: (n_rounds, n_actions)
         q_x_a = (q_x_a * cat_dim_importance_).sum(2)
 
-        pi_b = gen_eps_greedy(q_x_a, eps=self.eps) if is_online else softmax(self.beta * q_x_a)
+        pi_b = softmax(self.beta * q_x_a)
         # a ~ \pi_b(\cdot|x)
         action = sample_action_fast(pi_b)
 
@@ -92,7 +98,7 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
             # e_d ~ p(e_d|x,a), e ~ \prod_{d} p(e_d|x,a)
             action_context_d = sample_action_fast(self.p_e_d_a[action, :, d])
             action_context.append(action_context_d)
-        
+
         action_context = np.array(action_context).T
 
         cat_dim_importance_ = self.cat_dim_importance.reshape((1, self.n_cat_dim, 1))
@@ -106,15 +112,17 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         )
 
         return dict(
+            n_rounds=n_rounds,
             context=context,
             action=action,
             p_e_d_a=self.p_e_d_a,
+            e_a=None if self.is_probabilistic_embed else self.p_e_d_a.argmax(1),
             action_context=action_context,
             reward=reward,
-            pscore=pi_b[:, action],
+            pscore=pi_b[np.arange(n_rounds), action],
             expected_reward=q_x_a,
             expected_reward_factual=expected_reward_factual,
-            pi_b=pi_b
+            pi_b=pi_b,
         )
 
     def calc_ground_truth_policy_value(
@@ -140,7 +148,7 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
             .apply(LabelEncoder().fit_transform)
             .values
         )
-        
+
         action_context = np.repeat(action_context, len_list_, axis=0)
         tiled_position = np.tile(np.arange(len_list_), self.n_actions)
         self.unique_action_context = np.c_[action_context, tiled_position]
@@ -217,11 +225,10 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
 
         # train a classifier to define a logging policy
         self._train_pi_b()
-    
+
     @property
     def n_actions(self) -> int:
         return int(self.train_label.shape[1])
-
 
     def load_raw_data(self) -> None:
         self.train_feature, self.train_label = self._load_raw_data(
@@ -231,7 +238,9 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
             file_path=self.data_path / "test.txt", data_size=self.test_size
         )
 
-    def _load_raw_data(self, file_path: PosixPath, data_size: Optional[int] = None) -> tuple[np.ndarray, ...]:
+    def _load_raw_data(
+        self, file_path: PosixPath, data_size: Optional[int] = None
+    ) -> tuple[np.ndarray, ...]:
         with open(file_path, "r") as file:
             num_data, num_feature, num_label = file.readline().split()
             num_data = int(num_data) if data_size is None else data_size
@@ -245,44 +254,65 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
                 feature_ = [float(x.split(":")[1]) for x in data_[1:]]
 
                 label.append(
-                    sp.csr_matrix(([1.0] * len(label_), label_, [0, len(label_)]), shape=(1, num_label))
+                    sp.csr_matrix(
+                        ([1.0] * len(label_), label_, [0, len(label_)]),
+                        shape=(1, num_label),
+                    )
                 )
                 feature.append(
-                    sp.csr_matrix((feature_, feature_index, [0, len(feature_)]), shape=(1, num_feature))
+                    sp.csr_matrix(
+                        (feature_, feature_index, [0, len(feature_)]),
+                        shape=(1, num_feature),
+                    )
                 )
 
         return sp.vstack(feature).toarray(), sp.vstack(label).toarray()
 
     def pre_process(self) -> None:
-        self.n_train, self.n_test = self.train_feature.shape[0], self.test_feature.shape[0]
+        self.n_train, self.n_test = (
+            self.train_feature.shape[0],
+            self.test_feature.shape[0],
+        )
 
         # delete some rare actions
-        all_label = sp.vstack([self.train_label, self.test_label]).astype(np.int8).toarray()
+        all_label = (
+            sp.vstack([self.train_label, self.test_label]).astype(np.int8).toarray()
+        )
         idx = all_label.sum(axis=0) >= self.min_label_frequency
         all_label = all_label[:, idx]
 
         # generate reward_noise (depends on each action)
         self.eta = self.random_.uniform(self.max_reward_noise, size=all_label.shape[1])
 
-        self.train_label = sp.csr_matrix(all_label[: self.n_train], dtype=np.float32).toarray()
-        logits = self.train_label * (1 - self.eta) + (1 - self.train_label) * (self.eta - 1)
+        self.train_label = sp.csr_matrix(
+            all_label[: self.n_train], dtype=np.float32
+        ).toarray()
+        logits = self.train_label * (1 - self.eta) + (1 - self.train_label) * (
+            self.eta - 1
+        )
         self.train_expected_rewards = sigmoid(x=logits)
 
-        self.test_label = sp.csr_matrix(all_label[self.n_train :], dtype=np.float32).toarray()
-        logits = self.test_label * (1 - self.eta) + (1 - self.test_label) * (self.eta - 1)
+        self.test_label = sp.csr_matrix(
+            all_label[self.n_train :], dtype=np.float32
+        ).toarray()
+        logits = self.test_label * (1 - self.eta) + (1 - self.test_label) * (
+            self.eta - 1
+        )
         self.test_expected_rewards = sigmoid(x=logits)
 
-        self.train_contexts = self.sc.fit_transform(self.pca.fit_transform(self.train_feature))
-        self.test_contexts = self.sc.fit_transform(self.pca.fit_transform(self.test_feature))
+        self.train_contexts = self.sc.fit_transform(
+            self.pca.fit_transform(self.train_feature)
+        )
+        self.test_contexts = self.sc.fit_transform(
+            self.pca.fit_transform(self.test_feature)
+        )
 
     def _train_pi_b(self, max_iter: int = 500, batch_size: int = 2000) -> None:
         idx = self.random_.choice(self.n_test, size=batch_size, replace=False)
         self.regressor = MultiOutputRegressor(
             Ridge(max_iter=max_iter, random_state=self.random_state)
         )
-        self.regressor.fit(
-            self.test_contexts[idx], self.test_expected_rewards[idx]
-        )
+        self.regressor.fit(self.test_contexts[idx], self.test_expected_rewards[idx])
 
     def compute_pi_b(self, contexts: np.ndarray, beta: float = 1.0) -> np.ndarray:
         q_x_a_hat = self.regressor.predict(contexts)
