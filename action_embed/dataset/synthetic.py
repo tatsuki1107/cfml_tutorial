@@ -169,6 +169,8 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
         random_ = check_random_state(self.random_state)
         # deterministic action embeddings
         self.action_contexts = random_.normal(size=(self.n_actions, self.n_cat_per_dim, self.n_cat_dim)).argmax(1)
+        self.p_e_d_a = np.zeros((self.n_actions, self.n_cat_per_dim, self.n_cat_dim))
+        self.p_e_d_a[np.arange(self.n_actions)[:, None], self.action_contexts, np.arange(self.n_cat_dim)[None, :]] = 1
         
         self.action_context_one_hot = OneHotEncoder(drop="first", sparse=False).fit_transform(self.action_contexts)
         self.fixed_action_contexts = {a: c for a, c in enumerate(self.action_context_one_hot)}
@@ -180,17 +182,18 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
         ).argmax(1)
         self.n_clusters = np.unique(self.clusters).shape[0]
         self.clusters = rankdata(-self.clusters, method="dense") - 1
-        
-        self.cluster_one_hot = np.zeros((self.n_actions, self.n_clusters))
-        self.cluster_one_hot[np.arange(self.n_actions), self.clusters] = 1
-        self.fixed_cluster_contexts = {a: c for a, c in enumerate(self.cluster_one_hot)}
+        # context-free cluster
+        self.clusters = np.tile(self.clusters, reps=(self.n_users, 1))
+        # note that the cluster is deterministic
+        self.p_c_x_a = np.zeros((self.n_users, self.n_clusters, self.n_actions))
+        self.p_c_x_a[np.arange(self.n_users)[:, None], self.clusters, np.arange(self.n_actions)[None, :]] = 1
         
         g_x_c = cluster_effect_function(
             context=self.user_contexts,
             cluster_context=np.eye(self.n_clusters),
             random_state=self.random_state,
         )
-        g_x_c_a = g_x_c[:, self.clusters]
+        g_x_c_a = g_x_c[np.arange(self.n_users)[:, None], self.clusters]
         
         h_x_a = linear_reward_function(
             context=self.user_contexts,
@@ -228,6 +231,8 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
         # a ~ \pi_b(\cdot|x)
         actions = sample_action_fast(pi_b)
         
+        clusters = self.clusters[user_idx, actions]
+        
         # e ~ p(\cdot|x,a)
         action_contexts = self.action_contexts[actions]
         
@@ -242,17 +247,16 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             context=context,
             fixed_user_context=self.fixed_user_contexts,
             action=actions,
-            unique_action_context=self.action_contexts,
             action_context=action_contexts,
-            action_context_one_hot=self.action_context_one_hot,
             fixed_action_context=self.fixed_action_contexts,
-            cluster=self.clusters,
-            cluster_one_hot=self.cluster_one_hot,
-            fixed_cluster_context=self.fixed_cluster_contexts,
+            cluster=clusters,
             reward=rewards,
             pscore=pi_b[np.arange(n_rounds), actions],
             expected_reward=self.q_x_a,
             pi_b=pi_b,
+            p_e_d_a=self.p_e_d_a,
+            p_c_x_a=self.p_c_x_a[user_idx],
+            phi_x_a=self.clusters,
         )
     
     def calc_ground_truth_policy_value(self, q_x_a: np.ndarray, pi_e: np.ndarray) -> np.float64:

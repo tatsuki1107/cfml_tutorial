@@ -17,7 +17,6 @@ from torch.utils.data import DataLoader
 @dataclass
 class PairWiseDataset(Dataset):
     context: np.ndarray
-    cluster: np.ndarray
     action1: np.ndarray
     action2: np.ndarray
     action_emb1: np.ndarray
@@ -28,7 +27,6 @@ class PairWiseDataset(Dataset):
     def __getitem__(self, index):
         return (
             self.context[index],
-            self.cluster[index],
             self.action1[index],
             self.action2[index],
             self.action_emb1[index],
@@ -54,7 +52,7 @@ class PairWiseRegression:
     alpha: float = 1e-6
     log_eps: float = 1e-10
     solver: str = "adagrad"
-    max_iter: int = 30
+    max_iter: int = 10
     verbose: bool = False
     random_state: int = 12345
 
@@ -112,7 +110,7 @@ class PairWiseRegression:
         for _ in range(self.max_iter):
             losses = []
             self.nn_model.train()
-            for x_, c_, a1_, a2_, e1_, e2_, r1_, r2_ in data_loader:
+            for x_, a1_, a2_, e1_, e2_, r1_, r2_ in data_loader:
                 optimizer.zero_grad()
                 loss = self.calc_pairwise_loss(x=x_, a1=a1_, a2=a2_, r1=r1_, r2=r2_)
                 loss.backward()
@@ -146,10 +144,9 @@ class PairWiseRegression:
 
     def _make_pairwise_data(self, bandit_data: dict) -> DataLoader:
         user_idx, actions, rewards = bandit_data["user_idx"], bandit_data["action"], bandit_data["reward"]
-        clusters = bandit_data["cluster"][actions]
+        clusters = bandit_data["cluster"]
         fixed_user_contexts = bandit_data["fixed_user_context"]
         fixed_action_contexts = bandit_data["fixed_action_context"]
-        fixed_cluster_contexts = bandit_data["fixed_cluster_context"]
 
         reward_dict = defaultdict(dict)
         for user_id, action, reward in zip(user_idx, actions, rewards):
@@ -160,7 +157,6 @@ class PairWiseRegression:
             c_a_set_given_x[user_id].add((cluster, action))
 
         contexts_ = []
-        cluster_contexts_ = []
         actions1_, actions2_ = [], []
         action_contexts1_, action_contexts2_ = [], []
         rewards1_, rewards2_ = [], []
@@ -175,7 +171,6 @@ class PairWiseRegression:
                 for (a1, a2) in permutations(obs_actions_in_c, 2):
                     r1, r2 = reward_dict[u][a1], reward_dict[u][a1]
                     contexts_.append(fixed_user_contexts[u])
-                    cluster_contexts_.append(fixed_cluster_contexts[c])
                     actions1_.append(a1), actions2_.append(a2)
                     action_contexts1_.append(fixed_action_contexts[a1])
                     action_contexts2_.append(fixed_action_contexts[a2])
@@ -184,7 +179,6 @@ class PairWiseRegression:
 
         pairwise_dataset = PairWiseDataset(
             torch.from_numpy(np.array(contexts_)).float(),
-            torch.from_numpy(np.array(cluster_contexts_)).float(),
             torch.from_numpy(np.array(actions1_)).long(),
             torch.from_numpy(np.array(actions2_)).long(),
             torch.from_numpy(np.array(action_contexts1_)).float(),
