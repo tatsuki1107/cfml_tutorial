@@ -248,15 +248,16 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             fixed_user_context=self.fixed_user_contexts,
             action=actions,
             action_context=action_contexts,
+            action_context_one_hot=self.action_context_one_hot,
             fixed_action_context=self.fixed_action_contexts,
             cluster=clusters,
             reward=rewards,
             pscore=pi_b[np.arange(n_rounds), actions],
-            expected_reward=self.q_x_a,
+            expected_reward=self.q_x_a[user_idx],
             pi_b=pi_b,
             p_e_d_a=self.p_e_d_a,
             p_c_x_a=self.p_c_x_a[user_idx],
-            phi_x_a=self.clusters,
+            phi_x_a=self.clusters[user_idx],
         )
     
     def calc_ground_truth_policy_value(self, q_x_a: np.ndarray, pi_e: np.ndarray) -> np.float64:

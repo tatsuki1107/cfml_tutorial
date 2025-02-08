@@ -7,7 +7,7 @@ from typing import Callable, Optional
 import numpy as np
 from sklearn.base import ClassifierMixin
 
-from action_embed.ope.estimator import MarginalizedIPS
+from ope.estimator import MarginalizedIPS
 
 
 @dataclass

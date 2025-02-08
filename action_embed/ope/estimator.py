@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from abc import ABCMeta, abstractmethod
 from typing import Callable
+from typing import Optional
 
 import numpy as np
 
@@ -102,4 +103,47 @@ class DoublyRobust(BaseOffPolicyEstimator):
             q_hat=q_hat,
             q_hat_factual=q_hat_factual,
             action_dist=action_dist,
+        ).mean()
+
+
+@dataclass
+class OFFCEM(BaseOffPolicyEstimator):
+    def _estimate_round_rewards(
+        self,
+        reward: np.ndarray,
+        weight: np.ndarray,
+        f_hat: np.ndarray,
+        f_hat_factual: np.ndarray,
+        action_dist: np.ndarray,
+        cluster_dist: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        ips_values = weight * (reward - f_hat_factual)
+        
+        if cluster_dist is None:
+            dm_values = np.average(f_hat, weights=action_dist, axis=1)
+        
+        else:
+            action_dist_given_cluster = action_dist
+            f_hat_x_c = (action_dist_given_cluster * f_hat[:, :, None]).sum(axis=1)
+            dm_values = np.average(f_hat_x_c, weights=cluster_dist, axis=1)
+
+        return ips_values + dm_values
+
+    def estimate_policy_value(
+        self,
+        reward: np.ndarray,
+        weight: np.ndarray,
+        f_hat: np.ndarray,
+        f_hat_factual: np.ndarray,
+        action_dist: Optional[np.ndarray],
+        cluster_dist: Optional[np.ndarray] = None,
+    ) -> float:
+        
+        return self._estimate_round_rewards(
+            reward=reward,
+            weight=weight,
+            f_hat=f_hat,
+            f_hat_factual=f_hat_factual,
+            action_dist=action_dist,
+            cluster_dist=cluster_dist,
         ).mean()

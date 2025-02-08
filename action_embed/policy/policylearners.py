@@ -11,6 +11,31 @@ from torch.utils.data import DataLoader
 from sklearn.utils import check_random_state
 
 
+@dataclass
+class RegBasedPolicyDataset(Dataset):
+    context: np.ndarray
+    action: np.ndarray
+    reward: np.ndarray
+
+    def __post_init__(self):
+        """initialize class"""
+        assert (
+            self.context.shape[0]
+            == self.action.shape[0]
+            == self.reward.shape[0]
+        )
+
+    def __getitem__(self, index):
+        return (
+            self.context[index],
+            self.action[index],
+            self.reward[index],
+        )
+
+    def __len__(self):
+        return self.context.shape[0]
+
+
 
 @dataclass
 class GradientBasedPolicyDataset(Dataset):
@@ -158,6 +183,79 @@ class BaseGradientBasedPolicyLearner(ABC):
     @abstractmethod
     def predict(self) -> np.ndarray:
         pass
+
+
+class RegBasedPolicyLearner(BaseGradientBasedPolicyLearner):
+    """Policy Learner over Action Spaces."""
+    num_actions: int
+    
+    def __init__(self, num_actions: int, **kwargs) -> None:
+        """Initialize class."""
+        self.num_actions = num_actions
+        super().__init__(**kwargs)
+    
+    def __post_init__(self) -> None:
+        """Initialize class."""
+        super().__post_init__()
+
+        self.layer_list.append(("output", nn.Linear(self.input_size, self.num_actions)))
+        self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
+    
+    def _create_train_data_for_opl(
+        self,
+        context: np.ndarray,
+        action: np.ndarray,
+        reward: np.ndarray,
+    ) -> tuple:
+        dataset = RegBasedPolicyDataset(
+            torch.from_numpy(context).float(),
+            torch.from_numpy(action).long(),
+            torch.from_numpy(reward).float(),
+        )
+
+        data_loader = DataLoader(dataset, batch_size=self.batch_size)
+
+        return data_loader
+    
+    def fit(self, dataset: dict, dataset_test: dict) -> None:
+        context, action, reward = dataset["context"], dataset["action"], dataset["reward"]
+
+        training_data_loader = self._create_train_data_for_opl(
+            context=context,
+            action=action,
+            reward=reward,
+        )
+
+        # start policy training
+        scheduler, optimizer = self._init_scheduler()
+        q_x_a_train, q_x_a_test = dataset["expected_reward"], dataset_test["expected_reward"]
+        for _ in range(self.max_iter):
+            loss_epoch = 0.0
+            self.nn_model.train()
+            for context_, action_, reward_, in training_data_loader:
+                optimizer.zero_grad()
+                q_hat = self.nn_model(context_)
+                idx = torch.arange(action_.shape[0], dtype=torch.long)
+                loss = ((reward_ - q_hat[idx, action_]) ** 2).mean()
+                loss.backward()
+                optimizer.step()
+                loss_epoch += loss.item()
+            self.train_loss.append(loss_epoch)
+            scheduler.step()
+            pi_train = self.predict(dataset)
+            self.train_value.append((q_x_a_train * pi_train).sum(1).mean())
+            pi_test = self.predict(dataset_test)
+            self.test_value.append((q_x_a_test * pi_test).sum(1).mean())
+    
+    def predict(self, dataset_test: dict) -> np.ndarray:
+
+        self.nn_model.eval()
+        context = torch.from_numpy(dataset_test["context"]).float()
+        q_hat = self.nn_model(context).detach().numpy()
+        pi = np.zeros_like(q_hat)
+        pi[np.arange(q_hat.shape[0]), np.argmax(q_hat, axis=1)] = 1.0
+        
+        return pi
 
 
 class PolicyLearnerOverActionSpaces(BaseGradientBasedPolicyLearner):
