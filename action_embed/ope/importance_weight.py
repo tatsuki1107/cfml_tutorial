@@ -4,7 +4,7 @@ from sklearn.base import ClassifierMixin
 
 
 def vanilla_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
-    w_x_a = action_dist[:, data["action"]] / data["pscore"]
+    w_x_a = action_dist[np.arange(data["n_rounds"]), data["action"]] / data["pscore"]
     return w_x_a
 
 

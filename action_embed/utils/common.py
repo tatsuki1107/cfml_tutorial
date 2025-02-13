@@ -5,11 +5,13 @@ import seaborn as sns
 
 OPE_PALETTE = {
     "IPS": "tab:red",
+    "DM": "tab:pink",
     "DR": "tab:blue",
     "MIPS (true)": "tab:gray",
     "MIPS (true) w/SLOPE": "tab:orange",
     "OFFCEM": "tab:green",
     "OFFCEM + 1-step reg": "tab:olive",
+    "OFFCEM + cluster": "tab:brown",
     "OFFCEM (LC)": "tab:purple",
 }
 
@@ -125,22 +127,23 @@ def visualize_mean_squared_error(
     fig.legend(
         handles,
         labels,
-        fontsize=LABEL_FONTSIZE,
+        fontsize=20,
         ncol=len(palettes),
         loc="upper center",
         bbox_to_anchor=(0.5, 1.07),
     )
 
-    plt.show()
     plt.tight_layout()
     plt.subplots_adjust(top=0.85)
-
+    plt.show()
 
 def visualize_cdf_of_ralative_error(
     rel_result_df: DataFrame, baseline: str = "IPS"
 ) -> None:
     plt.style.use("ggplot")
     
+    estimators = rel_result_df["estimator"].unique()
+    palettes = {estimator: OPE_PALETTE[estimator] for estimator in estimators}
     baseline_se = rel_result_df[rel_result_df["estimator"] == baseline].set_index(
         "index"
     )["se"]
@@ -150,7 +153,7 @@ def visualize_cdf_of_ralative_error(
     fig, ax = plt.subplots(figsize=(12, 7), tight_layout=True)
     sns.ecdfplot(
         linewidth=4,
-        palette=OPE_PALETTE,
+        palette=palettes,
         data=rel_result_df,
         x="rel_se",
         hue="estimator",

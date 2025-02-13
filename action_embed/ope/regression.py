@@ -44,15 +44,15 @@ class PairWiseRegression:
     dim_context: int
     n_actions: int
     n_clusters: int
-    hidden_layer_size: tuple = (30, 30, 30)
+    hidden_layer_size: tuple = (10, 10, 10)
     activation: str = "elu"
-    batch_size: int = 16
+    batch_size: int = 256
     learning_rate_init: float = 0.005
     gamma: float = 0.98
     alpha: float = 1e-6
     log_eps: float = 1e-10
     solver: str = "adagrad"
-    max_iter: int = 10
+    max_iter: int = 30
     verbose: bool = False
     random_state: int = 12345
 

@@ -4,6 +4,7 @@ from typing import Callable
 from typing import Optional
 
 import numpy as np
+from obp.utils import check_array
 
 
 @dataclass
@@ -41,6 +42,9 @@ class InversePropensityScore(BaseOffPolicyEstimator):
         weight: np.ndarray,
     ) -> float:
         """Estimate the policy value of evaluation policy."""
+        check_array(array=reward, name="reward", expected_dim=1)
+        check_array(array=weight, name="weight", expected_dim=1)
+        
         return self._estimate_round_rewards(
             reward=reward,
             weight=weight,
@@ -56,6 +60,9 @@ class MarginalizedIPS(InversePropensityScore):
         lower_bound_func: Callable,
         delta: float = 0.05,
     ) -> tuple[np.float64]:
+        check_array(array=reward, name="reward", expected_dim=1)
+        check_array(array=weight, name="weight", expected_dim=1)
+        
         r_hat = self._estimate_round_rewards(reward=reward, weight=weight)
         cnf = lower_bound_func(r_hat, delta=delta, with_dev=True)
         return np.mean(r_hat), cnf
@@ -71,6 +78,9 @@ class DirectMethod(BaseOffPolicyEstimator):
     def estimate_policy_value(
         self, action_dist: np.ndarray, q_hat: np.ndarray
     ) -> np.float64:
+        check_array(array=action_dist, name="action_dist", expected_dim=2)
+        check_array(array=q_hat, name="q_hat", expected_dim=2)
+        
         return self._estimate_round_rewards(action_dist=action_dist, q_hat=q_hat).mean()
 
 
@@ -97,6 +107,12 @@ class DoublyRobust(BaseOffPolicyEstimator):
         q_hat_factual: np.ndarray,
         action_dist: np.ndarray,
     ) -> float:
+        check_array(array=reward, name="reward", expected_dim=1)
+        check_array(array=weight, name="weight", expected_dim=1)
+        check_array(array=q_hat, name="q_hat", expected_dim=2)
+        check_array(array=q_hat_factual, name="q_hat_factual", expected_dim=1)
+        check_array(array=action_dist, name="action_dist", expected_dim=2)
+        
         return self._estimate_round_rewards(
             reward=reward,
             weight=weight,
@@ -138,6 +154,12 @@ class OFFCEM(BaseOffPolicyEstimator):
         action_dist: Optional[np.ndarray],
         cluster_dist: Optional[np.ndarray] = None,
     ) -> float:
+        check_array(array=reward, name="reward", expected_dim=1)
+        check_array(array=weight, name="weight", expected_dim=1)
+        check_array(array=f_hat, name="f_hat", expected_dim=2)
+        check_array(array=f_hat_factual, name="f_hat_factual", expected_dim=1)
+        if cluster_dist is not None:
+            check_array(array=cluster_dist, name="cluster_dist", expected_dim=2)
         
         return self._estimate_round_rewards(
             reward=reward,

@@ -39,7 +39,7 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         )
         if not self.is_probabilistic_embed:
             p_e_d_a_ = np.zeros((self.n_actions, self.n_cat_per_dim, self.n_cat_dim))
-            p_e_d_a_[np.arange(self.n_actions)[:, None], self.p_e_d_a.argmax(1)] = 1.
+            p_e_d_a_[np.arange(self.n_actions)[:, None], self.p_e_d_a.argmax(1)] = 1.0
             self.p_e_d_a = p_e_d_a_
 
         self.latent_cat_param = self.random_.normal(
@@ -52,7 +52,8 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         )
 
     def obtain_batch_bandit_feedback(
-        self, n_rounds: int,
+        self,
+        n_rounds: int,
     ) -> dict:
         # x ~ p(x)
         context = self.random_.normal(size=(n_rounds, self.dim_context))
@@ -147,6 +148,10 @@ def cluster_effect_function(
     return g_x_e
 
 
+def sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1 / (1 + np.exp(-x))
+
+
 @dataclass
 class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
     n_users: int
@@ -159,26 +164,35 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
     reward_noise: float
     n_deficient_actions: int = 0
     random_state: int = 12345
-    
+
     def __post_init__(self) -> None:
-        
         random_ = check_random_state(self.random_state)
         self.user_contexts = random_.normal(size=(self.n_users, self.dim_context))
         self.fixed_user_contexts = {u: c for u, c in enumerate(self.user_contexts)}
 
         random_ = check_random_state(self.random_state)
         # deterministic action embeddings
-        self.action_contexts = random_.normal(size=(self.n_actions, self.n_cat_per_dim, self.n_cat_dim)).argmax(1)
+        self.action_contexts = random_.normal(
+            size=(self.n_actions, self.n_cat_per_dim, self.n_cat_dim)
+        ).argmax(1)
         self.p_e_d_a = np.zeros((self.n_actions, self.n_cat_per_dim, self.n_cat_dim))
-        self.p_e_d_a[np.arange(self.n_actions)[:, None], self.action_contexts, np.arange(self.n_cat_dim)[None, :]] = 1
-        
-        self.action_context_one_hot = OneHotEncoder(drop="first", sparse=False).fit_transform(self.action_contexts)
-        self.fixed_action_contexts = {a: c for a, c in enumerate(self.action_context_one_hot)}
-        
+        self.p_e_d_a[
+            np.arange(self.n_actions)[:, None],
+            self.action_contexts,
+            np.arange(self.n_cat_dim)[None, :],
+        ] = 1
+
+        self.action_context_one_hot = OneHotEncoder(
+            drop="first", sparse=False
+        ).fit_transform(self.action_contexts)
+        self.fixed_action_contexts = {
+            a: c for a, c in enumerate(self.action_context_one_hot)
+        }
+
         self.clusters = linear_behavior_policy(
             context=self.action_context_one_hot,
             action_context=np.eye(self.n_clusters),
-            random_state=self.random_state
+            random_state=self.random_state,
         ).argmax(1)
         self.n_clusters = np.unique(self.clusters).shape[0]
         self.clusters = rankdata(-self.clusters, method="dense") - 1
@@ -186,31 +200,37 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
         self.clusters = np.tile(self.clusters, reps=(self.n_users, 1))
         # note that the cluster is deterministic
         self.p_c_x_a = np.zeros((self.n_users, self.n_clusters, self.n_actions))
-        self.p_c_x_a[np.arange(self.n_users)[:, None], self.clusters, np.arange(self.n_actions)[None, :]] = 1
-        
-        g_x_c = cluster_effect_function(
+        self.p_c_x_a[
+            np.arange(self.n_users)[:, None],
+            self.clusters,
+            np.arange(self.n_actions)[None, :],
+        ] = 1
+
+        self.g_x_c = cluster_effect_function(
             context=self.user_contexts,
             cluster_context=np.eye(self.n_clusters),
             random_state=self.random_state,
         )
-        g_x_c_a = g_x_c[np.arange(self.n_users)[:, None], self.clusters]
-        
-        h_x_a = linear_reward_function(
+        self.g_x_c = sigmoid(self.g_x_c)
+        g_x_c_a = self.g_x_c[np.arange(self.n_users)[:, None], self.clusters]
+
+        self.h_x_a = linear_reward_function(
             context=self.user_contexts,
             action_context=self.action_context_one_hot,
-            random_state=self.random_state
+            random_state=self.random_state,
         )
+        self.h_x_a = sigmoid(self.h_x_a)
+
         # conjunct effect model (CEM)
-        self.q_x_a = h_x_a + g_x_c_a
-        
+        self.q_x_a = self.h_x_a + g_x_c_a
+
         self.random_ = check_random_state(self.random_state)
-    
+
     def obtain_batch_bandit_feedback(self, n_rounds: int) -> dict:
-        
         # x ~ p(x)
         user_idx = self.random_.choice(self.n_users, size=n_rounds)
         context = self.user_contexts[user_idx]
-        
+
         q_x_a = self.q_x_a[user_idx]
         if self.n_deficient_actions > 0:
             pi_b = np.zeros_like(q_x_a)
@@ -227,18 +247,19 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             )
         else:
             pi_b = softmax(self.beta * q_x_a)
-        
-        # a ~ \pi_b(\cdot|x)
+
+        # a ~ \pi_b(\cdot|x_u)
         actions = sample_action_fast(pi_b)
-        
+
         clusters = self.clusters[user_idx, actions]
-        
-        # e ~ p(\cdot|x,a)
+
+        # e ~ p(\cdot|x_u,a)
         action_contexts = self.action_contexts[actions]
-        
+
+        # r ~ p(r|x_u,a)
         expected_reward_factual = q_x_a[np.arange(n_rounds), actions]
         rewards = self.random_.normal(expected_reward_factual, self.reward_noise)
-        
+
         return dict(
             n_rounds=n_rounds,
             n_actions=self.n_actions,
@@ -259,6 +280,6 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             p_c_x_a=self.p_c_x_a[user_idx],
             phi_x_a=self.clusters[user_idx],
         )
-    
-    def calc_ground_truth_policy_value(self, q_x_a: np.ndarray, pi_e: np.ndarray) -> np.float64:
-        return np.average(q_x_a, weights=pi_e, axis=1).mean()
+
+    def calc_ground_truth_policy_value(self, pi_e: np.ndarray) -> np.float64:
+        return np.average(self.q_x_a, weights=pi_e, axis=1).mean()
