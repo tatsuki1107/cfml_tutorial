@@ -6,8 +6,10 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
+from sklearn.cluster import KMeans
 from sklearn.utils import check_random_state
 from sklearn.preprocessing import LabelEncoder
+from sklearn.preprocessing import OneHotEncoder
 from sklearn.decomposition import PCA
 from sklearn.linear_model import Ridge
 from sklearn.multioutput import MultiOutputRegressor
@@ -19,27 +21,61 @@ from obp.dataset import BaseRealBanditDataset
 
 @dataclass
 class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
+    n_clusters: int = 30
+    random_state: int = 12345
+    
     @property
     def n_actions(self) -> int:
-        return int(self.action.max() + 1)
+        return self.action.max() + 1
 
     def pre_process(self) -> None:
         user_cols = self.data.columns.str.contains("user_feature")
-        self.context = pd.get_dummies(
+        context = pd.get_dummies(
             self.data.loc[:, user_cols], drop_first=True
         ).values
+        self.user_context = np.unique(context, axis=0)
+        self.n_users = self.user_context.shape[0]
+        
+        self.context = np.zeros(len(context), dtype=int)
+        for u, user_context_ in enumerate(self.user_context):
+            user_mask = np.all(user_context_ == context, axis=1)
+            self.context[user_mask] = u
+        
+        self.fixed_user_context = {u: c for u, c in enumerate(self.user_context)}
+        
         len_list_ = self.position.max() + 1
         action_context = (
             self.item_context.drop(columns=["item_id", "item_feature_0"], axis=1)
             .apply(LabelEncoder().fit_transform)
             .values
         )
-
         action_context = np.repeat(action_context, len_list_, axis=0)
         tiled_position = np.tile(np.arange(len_list_), self.n_actions)
         self.unique_action_context = np.c_[action_context, tiled_position]
+        
         self.action = self.position * self.n_actions + self.action
         self.action_context = self.unique_action_context[self.action]
+        self.action_context_one_hot = OneHotEncoder(
+            drop="first", sparse=False
+        ).fit_transform(self.action_context)
+        self.fixed_action_contexts = {
+            a: c for a, c in enumerate(self.action_context_one_hot)
+        }
+        
+        # context-free cluster
+        self.cluster = KMeans(
+            n_clusters=self.n_clusters, random_state=self.random_state
+        ).fit_predict(self.unique_action_context)
+        self.cluster = np.tile(self.cluster, reps=(self.n_users, 1))
+        # note that the cluster is deterministic
+        n_actions_all = len(self.unique_action_context)
+        self.p_c_x_a = np.zeros((self.n_users, self.n_clusters, n_actions_all))
+        self.p_c_x_a[
+            np.arange(self.n_users)[:, None],
+            self.cluster,
+            np.arange(n_actions_all)[None, :],
+        ] = 1
+        
         self.position = np.zeros_like(self.position)
         self.pscore /= self.position.max() + 1
 
@@ -66,17 +102,22 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
         bootstrap_idx = random_.choice(
             np.arange(n_rounds), size=sample_size, replace=True
         )
-        for key_ in [
-            "action",
-            "position",
-            "reward",
-            "pscore",
-            "context",
-            "action_context",
-        ]:
+        for key_ in ["action", "position", "reward", "pscore", "action_context"]:
             bandit_feedback[key_] = bandit_feedback[key_][bootstrap_idx]
+
         bandit_feedback["n_rounds"] = sample_size
+        user_idx = bandit_feedback["context"][bootstrap_idx]
+        bandit_feedback["user_idx"] = user_idx
+        bandit_feedback["context"] = self.user_context[user_idx]
+        bandit_feedback["dim_context"] = self.user_context.shape[1]
+        bandit_feedback["fixed_user_context"] = self.fixed_user_context
         bandit_feedback["unique_action_context"] = self.unique_action_context
+        bandit_feedback["action_context_one_hot"] = self.action_context_one_hot
+        bandit_feedback["fixed_action_context"] = self.fixed_action_contexts
+        bandit_feedback["cluster"] = self.cluster[user_idx, bandit_feedback["action"]]
+        bandit_feedback["phi_x_a"] = self.cluster[user_idx]
+        bandit_feedback["p_c_x_a"] = self.p_c_x_a[user_idx]
+        
         return bandit_feedback
 
 
@@ -90,6 +131,7 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
     reward_std: float = 3.0
     max_reward_noise: float = 0.2
     dataset_name: str = "EUR-Lex4K"  # EUR-Lex4K or "RCV1-2K"
+    n_clusters: int = 30
     random_state: int = 12345
 
     def __post_init__(self):
@@ -166,6 +208,10 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
         )
         idx = all_label.sum(axis=0) >= self.min_label_frequency
         all_label = all_label[:, idx]
+        self.n_actions = all_label.shape[1]
+        
+        random_ = check_random_state(self.random_state)
+        self.unique_cluster = random_.randint(self.n_clusters, size=self.n_actions)
 
         # generate reward_noise (depends on each action)
         self.eta = self.random_.uniform(self.max_reward_noise, size=all_label.shape[1])

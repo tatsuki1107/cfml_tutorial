@@ -51,7 +51,7 @@ class PairWiseRegression:
     gamma: float = 0.98
     alpha: float = 1e-6
     log_eps: float = 1e-10
-    solver: str = "adagrad"
+    solver: str = "adam"
     max_iter: int = 30
     verbose: bool = False
     random_state: int = 12345
