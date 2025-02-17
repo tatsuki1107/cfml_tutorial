@@ -123,8 +123,11 @@ class PairWiseRegression:
             scheduler.step()
     
     def predict(self, context: np.ndarray) -> np.ndarray:
-        x = torch.from_numpy(context).float()
-        h_hat_mat = self.nn_model(x).detach().numpy()
+        
+        with torch.no_grad():
+            self.nn_model.eval()
+            x = torch.from_numpy(context).float()
+            h_hat_mat = self.nn_model(x).detach().numpy()
         
         return h_hat_mat
     
@@ -169,7 +172,7 @@ class PairWiseRegression:
 
             for c, obs_actions_in_c in a_set_given_c.items():
                 for (a1, a2) in permutations(obs_actions_in_c, 2):
-                    r1, r2 = reward_dict[u][a1], reward_dict[u][a1]
+                    r1, r2 = reward_dict[u][a1], reward_dict[u][a2]
                     contexts_.append(fixed_user_contexts[u])
                     actions1_.append(a1), actions2_.append(a2)
                     action_contexts1_.append(fixed_action_contexts[a1])

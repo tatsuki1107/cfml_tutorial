@@ -212,6 +212,7 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             random_state=self.random_state,
         )
         self.g_x_c = sigmoid(self.g_x_c)
+        
         g_x_c_a = self.g_x_c[np.arange(self.n_users)[:, None], self.clusters]
 
         self.h_x_a = linear_reward_function(

@@ -21,6 +21,9 @@ OPL_PALLETE = {
     "DR-PG": "tab:red",
     "Reg-based": "tab:gray",
     "POTEC": "tab:orange",
+    "OPL: POTEC, OPE: OFFCEM": "tab:blue",
+    "POTEC (1st reg)": "tab:olive",
+    "POTEC (cluster)": "tab:brown",
 }
 TITLE_FONTSIZE = 25
 LABEL_FONTSIZE = 25
@@ -207,9 +210,10 @@ def visualize_learning_curve(curve_df: DataFrame) -> None:
         loc="upper center",
         bbox_to_anchor=(0.5, 1.05),
     )
-    plt.show()
+
     plt.tight_layout()
     plt.subplots_adjust(top=0.85)
+    plt.show()
 
 
 def visualize_test_value(result_df: DataFrame, x_label: str, x_scale: str) -> None:
