@@ -10,8 +10,8 @@ OPE_PALETTE = {
     "MIPS (true)": "tab:gray",
     "MIPS (true) w/SLOPE": "tab:orange",
     "OFFCEM": "tab:green",
-    "OFFCEM + 1-step reg": "tab:olive",
-    "OFFCEM + cluster": "tab:brown",
+    "OFFCEM (1stage)": "tab:olive",
+    "OFFCEM (cluster)": "tab:brown",
     "OFFCEM (LC)": "tab:purple",
 }
 
@@ -22,7 +22,7 @@ OPL_PALLETE = {
     "Reg-based": "tab:gray",
     "POTEC": "tab:orange",
     "OPL: POTEC, OPE: OFFCEM": "tab:blue",
-    "POTEC (1st reg)": "tab:olive",
+    "POTEC (1stage)": "tab:olive",
     "POTEC (cluster)": "tab:brown",
 }
 TITLE_FONTSIZE = 25

@@ -276,6 +276,8 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             reward=rewards,
             pscore=pi_b[np.arange(n_rounds), actions],
             expected_reward=self.q_x_a[user_idx],
+            h_x_a=self.h_x_a[user_idx],
+            g_x_c=self.g_x_c[user_idx],
             pi_b=pi_b,
             p_e_d_a=self.p_e_d_a,
             p_c_x_a=self.p_c_x_a[user_idx],
