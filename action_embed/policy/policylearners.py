@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from typing import Optional
 
 import numpy as np
 import torch
@@ -476,7 +477,6 @@ class POTECDataset(Dataset):
         return self.context.shape[0]
 
 
-
 class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
     """Policy Learner over Action Embedding Spaces."""
     num_actions: int
@@ -682,3 +682,124 @@ class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
         )
         
         return estimated_policy_value
+
+
+class TruePolicyLearner(BasePolicyLearner):
+    """Policy Learner over Action Spaces."""
+    num_actions: int
+    regularization_type: str = None
+    
+    def __init__(self, num_actions: int, regularization_type: str = None, **kwargs) -> None:
+        """Initialize class."""
+        self.num_actions = num_actions
+        self.regularization_type = regularization_type
+        super().__init__(**kwargs)
+    
+    def __post_init__(self) -> None:
+        """Initialize class."""
+        super().__post_init__()
+
+        self.layer_list.append(("output", nn.Linear(self.input_size, self.num_actions)))
+        self.layer_list.append(("softmax", nn.Softmax(dim=1)))
+
+        self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
+        
+        self.new1_value, self.new2_value = [], []
+    
+    def fit(self, p_u: np.ndarray, x_u: np.ndarray, q_x_a: np.ndarray, squared_q_x_a: np.ndarray) -> None:
+        
+        p_u_ = torch.from_numpy(p_u).float()
+        x_u_ = torch.from_numpy(x_u).float()
+        q_x_a_ = torch.from_numpy(q_x_a).float()
+        squared_q_x_a_ = torch.from_numpy(squared_q_x_a).float()
+
+        # start policy training
+        scheduler, optimizer = self._init_scheduler()
+        for _ in range(self.max_iter):
+            self.nn_model.train()
+            optimizer.zero_grad()
+            pi_theta = self.nn_model(x_u_)
+            loss = -self._calc_policy_gradient(
+                p_u=p_u_,
+                pi_theta=pi_theta,
+                q_x_a=q_x_a_,
+                squared_q_x_a=squared_q_x_a_
+            )
+
+            loss.backward()
+            optimizer.step()
+
+            self.train_loss.append(loss.item())
+            scheduler.step()
+
+            pi_theta = self.predict(x_u=x_u)
+            
+            policy_value = self.calc_ground_truth_policy_value(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a)
+            self.test_value.append(policy_value)
+            new1_value = self.calc_new1_value(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a, squared_q_x_a=squared_q_x_a)
+            self.new1_value.append(new1_value)
+            new2_value = self.calc_new2_value(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a)
+            self.new2_value.append(new2_value)
+    
+    def predict(self, x_u: np.ndarray) -> np.ndarray:
+
+        self.nn_model.eval()
+        x_u_ = torch.from_numpy(x_u).float()
+        pi_theta = self.nn_model(x_u_).detach().numpy()
+        
+        return pi_theta
+    
+    def calc_ground_truth_policy_value(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray) -> np.float64:
+        return (p_u[:, None] * pi_theta * q_x_a).sum()
+    
+    def calc_new1_value(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray, squared_q_x_a: np.ndarray) -> np.float64:
+        squared_policy_value = (p_u[:, None] * pi_theta * squared_q_x_a).sum()
+        policy_value = (p_u[:, None] * pi_theta * q_x_a).sum()
+        reg_term = squared_policy_value - (policy_value ** 2)
+        return policy_value - reg_term
+    
+    def calc_new2_value(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray) -> np.float64:
+        q_u = (pi_theta * q_x_a).sum(1)
+        policy_value = (p_u * q_u).sum()
+        reg_term = (p_u * (q_u ** 2)).sum() - (policy_value ** 2)
+        return policy_value - reg_term
+
+    
+    def _calc_policy_gradient(
+        self,
+        p_u: torch.Tensor,
+        pi_theta: torch.Tensor,
+        q_x_a: torch.Tensor,
+        squared_q_x_a: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        current_pi = pi_theta.detach()
+        log_prob = torch.log(pi_theta + self.log_eps)
+        
+        policy_gradient = (p_u[:, None] * current_pi * q_x_a * log_prob).sum()
+        
+        if self.regularization_type is None:
+            return policy_gradient
+        
+        # regularization
+        # (cfml本 章末問題 5.4)
+        if self.regularization_type == "all_variance":
+            squared_policy_gradient = (p_u[:, None] * current_pi * squared_q_x_a * log_prob).sum()
+            policy_value = (p_u[:, None] * current_pi * q_x_a).sum()
+            reg_term = squared_policy_gradient - 2 * policy_value * policy_gradient
+        
+        elif self.regularization_type == "x_variance":
+            q_x = (current_pi * q_x_a).sum(1)
+            nabla_q_x_a = (current_pi * q_x_a * log_prob).sum(1)
+            first_term = 2 * (p_u * q_x * nabla_q_x_a).sum()
+            
+            policy_value = (p_u[:, None] * current_pi * q_x_a).sum()
+            second_term = 2 * policy_value * policy_gradient
+            
+            reg_term = first_term - second_term
+        
+        else:
+            raise NotImplementedError
+        
+        policy_gradient = policy_gradient - reg_term
+        
+        return policy_gradient

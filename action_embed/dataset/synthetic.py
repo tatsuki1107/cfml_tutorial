@@ -162,11 +162,19 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
     n_clusters: int
     beta: float
     reward_noise: float
+    beta_user: float = 0.0
     n_deficient_actions: int = 0
     random_state: int = 12345
 
     def __post_init__(self) -> None:
+        
+        # p_u
         random_ = check_random_state(self.random_state)
+        p_u_logits = random_.normal(size=self.n_users)
+        self.p_u = softmax(self.beta_user * p_u_logits[None, :])[0]
+        
+        random_ = check_random_state(self.random_state)
+        # x_u
         self.user_contexts = random_.normal(size=(self.n_users, self.dim_context))
         self.fixed_user_contexts = {u: c for u, c in enumerate(self.user_contexts)}
 
@@ -224,12 +232,18 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
 
         # conjunct effect model (CEM)
         self.q_x_a = self.h_x_a + g_x_c_a
+        
+        # define the reward variance
+        random_ = check_random_state(self.random_state)
+        eps = 1e-6
+        self.sigma_x_a = random_.uniform(0, self.reward_noise, size=(self.n_users, self.n_actions)) + eps
+        self.squared_q_x_a = self.sigma_x_a ** 2 + self.q_x_a ** 2
 
         self.random_ = check_random_state(self.random_state)
 
     def obtain_batch_bandit_feedback(self, n_rounds: int) -> dict:
         # x ~ p(x)
-        user_idx = self.random_.choice(self.n_users, size=n_rounds)
+        user_idx = self.random_.choice(self.n_users, size=n_rounds, p=self.p_u)
         context = self.user_contexts[user_idx]
 
         q_x_a = self.q_x_a[user_idx]
@@ -259,7 +273,8 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
 
         # r ~ p(r|x_u,a)
         expected_reward_factual = q_x_a[np.arange(n_rounds), actions]
-        rewards = self.random_.normal(expected_reward_factual, self.reward_noise)
+        reward_noise_factual = self.sigma_x_a[user_idx, actions]
+        rewards = self.random_.normal(expected_reward_factual, reward_noise_factual)
 
         return dict(
             n_rounds=n_rounds,

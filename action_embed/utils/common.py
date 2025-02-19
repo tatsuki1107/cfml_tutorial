@@ -16,6 +16,12 @@ OPE_PALETTE = {
 }
 
 OPL_PALLETE = {
+    # settings for experiments w/o regularization
+    "Generalization": "tab:blue",
+    "New1": "tab:red",
+    "New2": "tab:green",
+    
+    # opl estimator
     "IPS-PG": "tab:green",
     "MIPS-PG": "tab:purple",
     "DR-PG": "tab:red",
