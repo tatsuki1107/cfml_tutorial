@@ -164,6 +164,7 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
     reward_noise: float
     beta_user: float = 0.0
     n_deficient_actions: int = 0
+    reward_type: str = "continuous"
     random_state: int = 12345
 
     def __post_init__(self) -> None:
@@ -233,11 +234,20 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
         # conjunct effect model (CEM)
         self.q_x_a = self.h_x_a + g_x_c_a
         
-        # define the reward variance
-        random_ = check_random_state(self.random_state)
-        eps = 1e-6
-        self.sigma_x_a = random_.uniform(0, self.reward_noise, size=(self.n_users, self.n_actions)) + eps
-        self.squared_q_x_a = self.sigma_x_a ** 2 + self.q_x_a ** 2
+        if self.reward_type == "continuous":
+            # define the reward variance
+            random_ = check_random_state(self.random_state)
+            eps = 1e-6
+            self.sigma_x_a = random_.uniform(0, self.reward_noise, size=(self.n_users, self.n_actions)) + eps
+            self.squared_q_x_a = self.sigma_x_a ** 2 + self.q_x_a ** 2
+        
+        elif self.reward_type == "binary":
+            self.q_x_a = sigmoid(self.q_x_a)
+            self.squared_q_x_a = self.q_x_a
+            self.sigma_x_a = np.sqrt(self.q_x_a * (1 - self.q_x_a))
+        
+        else:
+            raise ValueError("reward_type must be either 'continuous' or 'binary'")
 
         self.random_ = check_random_state(self.random_state)
 
@@ -273,8 +283,13 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
 
         # r ~ p(r|x_u,a)
         expected_reward_factual = q_x_a[np.arange(n_rounds), actions]
-        reward_noise_factual = self.sigma_x_a[user_idx, actions]
-        rewards = self.random_.normal(expected_reward_factual, reward_noise_factual)
+        
+        if self.reward_type == "continuous":
+            reward_noise_factual = self.sigma_x_a[user_idx, actions]
+            rewards = self.random_.normal(expected_reward_factual, reward_noise_factual)
+        
+        elif self.reward_type == "binary":
+            rewards = self.random_.binomial(n=1, p=expected_reward_factual)
 
         return dict(
             n_rounds=n_rounds,
@@ -297,7 +312,10 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             p_e_d_a=self.p_e_d_a,
             p_c_x_a=self.p_c_x_a[user_idx],
             phi_x_a=self.clusters[user_idx],
+            p_u=self.p_u,
+            x_u=self.user_contexts,
+            q_x_a=self.q_x_a,
         )
 
     def calc_ground_truth_policy_value(self, pi_e: np.ndarray) -> np.float64:
-        return np.average(self.q_x_a, weights=pi_e, axis=1).mean()
+        return (self.p_u[:, None] * pi_e * self.q_x_a).sum()

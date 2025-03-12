@@ -16,10 +16,16 @@ OPE_PALETTE = {
 }
 
 OPL_PALLETE = {
-    # settings for experiments w/o regularization
+    # settings for experiments /w or w/o regularization
     "Generalization": "tab:blue",
     "New1": "tab:red",
     "New2": "tab:green",
+    
+    # settings for experiments /w or w/o each hyperparameter optimization
+    "Validation": "tab:green",
+    "Val-Generalization": "tab:red",
+    "CSO": "tab:blue",
+    "CSO-Generalization": "tab:gray",
     
     # opl estimator
     "IPS-PG": "tab:green",

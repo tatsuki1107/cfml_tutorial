@@ -17,6 +17,7 @@ from ope.importance_weight import marginal_weight_over_cluster_spaces
 from ope.estimator import InversePropensityScore
 from ope.estimator import MarginalizedIPS
 from ope.estimator import OFFCEM
+from utils.lower_bound import estimate_student_t_lower_bound
 
 
 @dataclass
@@ -91,10 +92,14 @@ class BasePolicyLearner(ABC):
     log_eps: float = 1e-10
     solver: str = "adagrad"
     max_iter: int = 30
+    objective: str = "baseline"
     random_state: int = 12345
 
     def __post_init__(self) -> None:
         """Initialize class."""
+        
+        if not self.objective in {"baseline", "CSO"}:
+            raise NotImplementedError
         
         self.random_ = check_random_state(self.random_state)
         self.train_loss = []
@@ -102,6 +107,7 @@ class BasePolicyLearner(ABC):
         self.test_value = []
         self.test_estimated_value = []
         
+        torch.manual_seed(self.random_state)
         self.input_size = self.dim_context
 
         if self.activation == "tanh":
@@ -306,7 +312,7 @@ class PolicyLearnerOverActionSpaces(BasePolicyLearner):
 
         # start policy training
         scheduler, optimizer = self._init_scheduler()
-        q_x_a_train, q_x_a_test = dataset["expected_reward"], dataset_test["expected_reward"]
+        q_x_a_test, p_u_test = dataset_test["q_x_a"], dataset_test["p_u"]
         for _ in range(self.max_iter):
             loss_epoch = 0.0
             self.nn_model.train()
@@ -325,16 +331,65 @@ class PolicyLearnerOverActionSpaces(BasePolicyLearner):
                 loss_epoch += loss.item()
             self.train_loss.append(loss_epoch)
             scheduler.step()
-            pi_train = self.predict(dataset)
-            self.train_value.append((q_x_a_train * pi_train).sum(1).mean())
-            pi_test = self.predict(dataset_test)
-            self.test_value.append((q_x_a_test * pi_test).sum(1).mean())
+            
+            pi_test = self.compute(dataset_test)
+            estimated_policy_value = self.predict(data=dataset_test, action_dist=pi_test)
+            
+            # Note that this is the true policy value, which is not available in practice.
+            policy_value = self.calc_ground_truth_policy_value(
+                p_u=p_u_test,
+                action_dist=pi_test,
+                q_x_a=q_x_a_test
+            )
+            
+            if self.test_estimated_value:
+                last_estimated_value = self.test_estimated_value[-1]
+                if estimated_policy_value < last_estimated_value:
+                    len_ = self.max_iter - len(self.test_estimated_value)
+                    self.test_estimated_value.extend([last_estimated_value] * len_)
+                    last_true_value = self.test_value[-1]
+                    self.test_value.extend([last_true_value] * len_)
+                    break
+                
+            self.test_estimated_value.append(estimated_policy_value)
+            self.test_value.append(policy_value)
     
-    def predict(self, dataset_test: dict) -> np.ndarray:
+    def compute(self, dataset_test: dict) -> np.ndarray:
 
         self.nn_model.eval()
-        context = torch.from_numpy(dataset_test["context"]).float()
+        context = torch.from_numpy(dataset_test["x_u"]).float()
         return self.nn_model(context).detach().numpy()
+    
+    def calc_ground_truth_policy_value(
+        self,
+        p_u: np.ndarray,
+        action_dist: np.ndarray, 
+        q_x_a: np.ndarray
+    ) -> np.float64:
+        return (p_u[:, None] * action_dist * q_x_a).sum()
+    
+    def predict(self, data: dict, action_dist: np.ndarray) -> np.float64:
+        
+        weight = action_dist[data["user_idx"], data["action"]] / data["pscore"]
+        reward = data["reward"]
+        
+        estimated_policy_value = self.ope_estimator.estimate_policy_value(
+            weight=weight, reward=reward
+        )
+        
+        if self.objective == "baseline":
+            return estimated_policy_value
+        
+        
+        if self.objective == "CSO":
+            conf = estimate_student_t_lower_bound(
+                x=reward * weight, 
+                delta=0.1,
+                is_both_side=False,
+            )
+            estimated_policy_value -= conf
+        
+        return estimated_policy_value
 
 
 @dataclass(init=False)
@@ -537,6 +592,7 @@ class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
         # start policy training
         scheduler, optimizer = self._init_scheduler()
         context_test, q_x_a_test = dataset_test["context"], dataset_test["expected_reward"]
+        p_x_test = dataset_test["p_u"]
         for _ in range(self.max_iter):
             loss_epoch = 0.0
             self.nn_model.train()
@@ -736,10 +792,10 @@ class TruePolicyLearner(BasePolicyLearner):
             
             policy_value = self.calc_ground_truth_policy_value(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a)
             self.test_value.append(policy_value)
-            new1_value = self.calc_new1_value(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a, squared_q_x_a=squared_q_x_a)
-            self.new1_value.append(new1_value)
-            new2_value = self.calc_new2_value(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a)
-            self.new2_value.append(new2_value)
+            Var_u_a_r = self.calc_var_all(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a, squared_q_x_a=squared_q_x_a)
+            self.new1_value.append(Var_u_a_r)
+            Var_u_E_a_r = self.calc_var_u(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a)
+            self.new2_value.append(Var_u_E_a_r)
     
     def predict(self, x_u: np.ndarray) -> np.ndarray:
 
@@ -752,17 +808,17 @@ class TruePolicyLearner(BasePolicyLearner):
     def calc_ground_truth_policy_value(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray) -> np.float64:
         return (p_u[:, None] * pi_theta * q_x_a).sum()
     
-    def calc_new1_value(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray, squared_q_x_a: np.ndarray) -> np.float64:
+    def calc_var_all(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray, squared_q_x_a: np.ndarray) -> np.float64:
         squared_policy_value = (p_u[:, None] * pi_theta * squared_q_x_a).sum()
         policy_value = (p_u[:, None] * pi_theta * q_x_a).sum()
-        reg_term = squared_policy_value - (policy_value ** 2)
-        return policy_value - reg_term
+        variance_all = squared_policy_value - (policy_value ** 2)
+        return variance_all
     
-    def calc_new2_value(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray) -> np.float64:
+    def calc_var_u(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray) -> np.float64:
         q_u = (pi_theta * q_x_a).sum(1)
         policy_value = (p_u * q_u).sum()
-        reg_term = (p_u * (q_u ** 2)).sum() - (policy_value ** 2)
-        return policy_value - reg_term
+        variance_u = (p_u * (q_u ** 2)).sum() - (policy_value ** 2)
+        return variance_u
 
     
     def _calc_policy_gradient(
