@@ -54,14 +54,15 @@ class PairWiseRegression:
     solver: str = "adam"
     max_iter: int = 30
     verbose: bool = False
+    early_stopping: bool = False
     random_state: int = 12345
 
     def __post_init__(self) -> None:
         """Initialize class."""
-        
+
         self.random_ = check_random_state(self.random_state)
         self.loss_list = []
-        
+
         self.input_size = self.dim_context
 
         if self.activation == "tanh":
@@ -70,16 +71,15 @@ class PairWiseRegression:
             self.activation_layer = nn.ReLU
         elif self.activation == "elu":
             self.activation_layer = nn.ELU
-        
+
         self.layer_list = []
         for i, h in enumerate(self.hidden_layer_size):
             self.layer_list.append(("l{}".format(i), nn.Linear(self.input_size, h)))
             self.layer_list.append(("a{}".format(i), self.activation_layer()))
             self.input_size = h
-        
+
         self.layer_list.append(("output", nn.Linear(self.input_size, self.n_actions)))
         self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
-        
 
     def _init_scheduler(self) -> tuple[ExponentialLR, optim.Optimizer]:
         if self.solver == "adagrad":
@@ -96,15 +96,14 @@ class PairWiseRegression:
             )
         else:
             raise NotImplementedError("`solver` must be one of 'adam' or 'adagrad'")
-        
-        scheduler = ExponentialLR(optimizer, gamma=self.gamma)
-        
-        return scheduler, optimizer
 
+        scheduler = ExponentialLR(optimizer, gamma=self.gamma)
+
+        return scheduler, optimizer
 
     def fit(self, bandit_data: dict) -> None:
         data_loader = self._make_pairwise_data(bandit_data)
-        
+
         # start pairwise training
         scheduler, optimizer = self._init_scheduler()
         for _ in range(self.max_iter):
@@ -116,37 +115,51 @@ class PairWiseRegression:
                 loss.backward()
                 optimizer.step()
                 losses.append(loss.detach().numpy())
-                
+
+            epoch_loss = np.average(losses)
+            if self.early_stopping and len(self.loss_list) > 0:
+                if epoch_loss > self.loss_list[-1]:
+                    break
+
             if self.verbose:
-                print(_, np.average(losses))
-            self.loss_list.append(np.average(losses))
+                print(_, epoch_loss)
+            self.loss_list.append(epoch_loss)
             scheduler.step()
-    
+
     def predict(self, context: np.ndarray) -> np.ndarray:
-        
         with torch.no_grad():
             self.nn_model.eval()
             x = torch.from_numpy(context).float()
             h_hat_mat = self.nn_model(x).detach().numpy()
-        
+
         return h_hat_mat
-    
+
     def fit_predict(self, bandit_data: dict) -> np.ndarray:
         self.fit(bandit_data)
         h_hat_mat = self.predict(bandit_data["context"])
-        
+
         return h_hat_mat
-    
-    def calc_pairwise_loss(self, x: torch.Tensor, a1: torch.Tensor, a2: torch.Tensor, r1: torch.Tensor, r2: torch.Tensor) -> torch.Tensor:
+
+    def calc_pairwise_loss(
+        self,
+        x: torch.Tensor,
+        a1: torch.Tensor,
+        a2: torch.Tensor,
+        r1: torch.Tensor,
+        r2: torch.Tensor,
+    ) -> torch.Tensor:
         h_hat = self.nn_model(x)
         h_hat1, h_hat2 = h_hat[:, a1], h_hat[:, a2]
         loss = ((r1 - r2) - (h_hat1 - h_hat2)) ** 2
-        
+
         return loss.mean()
-        
 
     def _make_pairwise_data(self, bandit_data: dict) -> DataLoader:
-        user_idx, actions, rewards = bandit_data["user_idx"], bandit_data["action"], bandit_data["reward"]
+        user_idx, actions, rewards = (
+            bandit_data["user_idx"],
+            bandit_data["action"],
+            bandit_data["reward"],
+        )
         clusters = bandit_data["cluster"]
         fixed_user_contexts = bandit_data["fixed_user_context"]
         fixed_action_contexts = bandit_data["fixed_action_context"]
@@ -165,20 +178,18 @@ class PairWiseRegression:
         rewards1_, rewards2_ = [], []
 
         for u in np.unique(user_idx):
-
             a_set_given_c = defaultdict(set)
             for cluster, action in c_a_set_given_x[u]:
                 a_set_given_c[cluster].add(action)
 
             for c, obs_actions_in_c in a_set_given_c.items():
-                for (a1, a2) in permutations(obs_actions_in_c, 2):
+                for a1, a2 in permutations(obs_actions_in_c, 2):
                     r1, r2 = reward_dict[u][a1], reward_dict[u][a2]
                     contexts_.append(fixed_user_contexts[u])
                     actions1_.append(a1), actions2_.append(a2)
                     action_contexts1_.append(fixed_action_contexts[a1])
                     action_contexts2_.append(fixed_action_contexts[a2])
                     rewards1_.append(r1), rewards2_.append(r2)
-
 
         pairwise_dataset = PairWiseDataset(
             torch.from_numpy(np.array(contexts_)).float(),
@@ -191,9 +202,7 @@ class PairWiseRegression:
         )
 
         data_loader = DataLoader(
-            pairwise_dataset,
-            batch_size=self.batch_size,
-            shuffle=True
+            pairwise_dataset, batch_size=self.batch_size, shuffle=True
         )
 
         return data_loader

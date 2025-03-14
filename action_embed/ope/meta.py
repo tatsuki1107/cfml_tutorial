@@ -28,15 +28,19 @@ class OffPolicyEvaluation:
             self.is_model_dependent = True
 
     def _create_estimator_inputs(
-        self, action_dist: np.ndarray, estimated_rewards: Optional[dict[str, np.ndarray]] = None
+        self,
+        action_dist: np.ndarray,
+        estimated_rewards: Optional[dict[str, np.ndarray]] = None,
     ) -> dict:
         if ("IPS" in self.estimator_names) or ("DR" in self.estimator_names):
             w_x_a = vanilla_weight(data=self.bandit_feedback, action_dist=action_dist)
 
-        if "MIPS (true)" in self.estimator_names or "MDR (true)" in self.estimator_names:
+        if (
+            "MIPS (true)" in self.estimator_names
+            or "MDR (true)" in self.estimator_names
+        ):
             w_x_e = marginal_weight_over_embedding_spaces(
-                data=self.bandit_feedback, 
-                action_dist=action_dist
+                data=self.bandit_feedback, action_dist=action_dist
             )
 
         if ("MIPS" in self.estimator_names) or ("MDR" in self.estimator_names):
@@ -45,13 +49,22 @@ class OffPolicyEvaluation:
                 action_dist=action_dist,
                 weight_estimator=RandomForestClassifier(n_estimators=10, max_depth=10),
             )
-        
+
         if any("OFFCEM" in name for name in self.estimator_names):
             w_x_c = marginal_weight_over_cluster_spaces(
-                data=self.bandit_feedback, 
-                action_dist=action_dist
+                action_dist=action_dist,
+                phi_x_a=self.bandit_feedback["phi_x_a"],
+                cluster=self.bandit_feedback["cluster"],
+                pi_b=self.bandit_feedback["pi_b"],
             )
-        
+
+        if "OFFCEM (LC)" in self.estimator_names:
+            true_w_x_c = marginal_weight_over_cluster_spaces(
+                action_dist=action_dist,
+                phi_x_a=self.bandit_feedback["true_phi_x_a"],
+                cluster=self.bandit_feedback["true_cluster"],
+                pi_b=self.bandit_feedback["pi_b"],
+            )
 
         input_data = {}
         for estimator_name in self.estimator_names:
@@ -68,32 +81,40 @@ class OffPolicyEvaluation:
             elif estimator_name in ["MIPS", "MDR"]:
                 input_data_["weight"] = w_x_e_hat
             elif "OFFCEM" in estimator_name:
-                input_data_["weight"] = w_x_c
+                if estimator_name == "OFFCEM (LC)":
+                    input_data_["weight"] = true_w_x_c
+                else:
+                    input_data_["weight"] = w_x_c
 
             # estimated reward
             if estimator_name == "DR":
                 rounds = np.arange(self.bandit_feedback["n_rounds"])
                 q_hat = estimated_rewards[estimator_name]
-                input_data_["q_hat_factual"] = q_hat[rounds, self.bandit_feedback["action"]]
+                input_data_["q_hat_factual"] = q_hat[
+                    rounds, self.bandit_feedback["action"]
+                ]
 
             if estimator_name in ["DM", "DR"]:
                 input_data_["q_hat"] = estimated_rewards[estimator_name]
                 input_data_["action_dist"] = action_dist
-            
+
             if "OFFCEM" in estimator_name:
                 rounds = np.arange(self.bandit_feedback["n_rounds"])
                 f_hat = estimated_rewards[estimator_name]
-                input_data_["f_hat_factual"] = f_hat[rounds, self.bandit_feedback["action"]]
+                input_data_["f_hat_factual"] = f_hat[
+                    rounds, self.bandit_feedback["action"]
+                ]
                 input_data_["f_hat"] = f_hat
                 input_data_["action_dist"] = action_dist
 
             input_data[estimator_name] = input_data_
 
         return input_data
-    
 
     def estimate_policy_values(
-        self, action_dist: np.ndarray, estimated_rewards: Optional[dict[str, np.ndarray]] = None
+        self,
+        action_dist: np.ndarray,
+        estimated_rewards: Optional[dict[str, np.ndarray]] = None,
     ) -> dict:
         if (estimated_rewards is None) and self.is_model_dependent:
             raise ValueError("estimated_rewards must be given")

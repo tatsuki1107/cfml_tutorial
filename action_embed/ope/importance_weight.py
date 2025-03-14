@@ -12,6 +12,7 @@ def clipped_weight(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
     w_x_a = vanilla_weight(data=data, action_dist=action_dist)
     return np.minimum(w_x_a, kwargs["lambda"])
 
+
 def marginal_pscore_over_embedding_spaces(data: dict) -> np.ndarray:
     p_e_a = []
     for d in range(data["action_context"].shape[-1]):
@@ -19,16 +20,19 @@ def marginal_pscore_over_embedding_spaces(data: dict) -> np.ndarray:
 
     p_e_a = np.array(p_e_a).T.prod(axis=2)
     p_e_x_pi_b = (data["pi_b"] * p_e_a).sum(axis=1)
-    
+
     return p_e_x_pi_b
 
-def marginal_weight_over_embedding_spaces(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
+
+def marginal_weight_over_embedding_spaces(
+    data: dict, action_dist: np.ndarray, **kwargs
+) -> np.ndarray:
     action_embed_dim = (
         kwargs["action_embed_dim"]
         if "action_embed_dim" in kwargs
         else np.arange(data["action_context"].shape[-1])
     )
-    
+
     if "unique_action_context" in data:
         mask_e_a_e = []
         for e_a in data["unique_action_context"][:, action_embed_dim]:
@@ -54,17 +58,42 @@ def marginal_weight_over_embedding_spaces(data: dict, action_dist: np.ndarray, *
     return w_x_e
 
 
-def marginal_pscore_over_cluster_spaces(data: dict) -> np.ndarray:
-    p_c_x_pi_b = (data["p_c_x_a"] * data["pi_b"][:, None, :]).sum(2)
-    return p_c_x_pi_b[np.arange(data["n_rounds"]), data["cluster"]]
+def marginal_pscore_over_cluster_spaces(
+    cluster: np.ndarray, pi_b: np.ndarray, phi_x_a: np.ndarray
+) -> np.ndarray:
+    # context-free cluster
+    phi_a = phi_x_a[0]
+
+    mask_c_phi_x_a = []
+    for phi_a_ in phi_a:
+        mask_c_phi_x_a.append(cluster == phi_a_)
+
+    mask_c_phi_x_a = np.array(mask_c_phi_x_a).T
+    p_c_x_pi_b = (pi_b * mask_c_phi_x_a).sum(axis=1)
+
+    return p_c_x_pi_b
 
 
-def marginal_weight_over_cluster_spaces(data: dict, action_dist: np.ndarray, **kwargs) -> np.ndarray:
-    p_c_x_pi_e = (data["p_c_x_a"] * action_dist[:, None, :]).sum(2)
-    p_c_x_pi_b = (data["p_c_x_a"] * data["pi_b"][:, None, :]).sum(2)
+def marginal_weight_over_cluster_spaces(
+    action_dist: np.ndarray,
+    phi_x_a: np.ndarray,
+    cluster: np.ndarray,
+    pi_b: np.ndarray,
+    **kwargs,
+) -> np.ndarray:
+    # context-free cluster
+    phi_a = phi_x_a[0]
 
+    mask_c_phi_x_a = []
+    for phi_a_ in phi_a:
+        mask_c_phi_x_a.append(cluster == phi_a_)
+
+    mask_c_phi_x_a = np.array(mask_c_phi_x_a).T
+    p_c_x_pi_b = (pi_b * mask_c_phi_x_a).sum(axis=1)
+    p_c_x_pi_e = (action_dist * mask_c_phi_x_a).sum(axis=1)
     w_x_c = p_c_x_pi_e / p_c_x_pi_b
-    return w_x_c[np.arange(data["n_rounds"]), data["cluster"]]
+
+    return w_x_c
 
 
 def estimated_marginal_weight(

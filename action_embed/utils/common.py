@@ -20,13 +20,18 @@ OPL_PALLETE = {
     "Generalization": "tab:blue",
     "New1": "tab:red",
     "New2": "tab:green",
-    
     # settings for experiments /w or w/o each hyperparameter optimization
     "Validation": "tab:green",
     "Val-Generalization": "tab:red",
     "CSO": "tab:blue",
     "CSO-Generalization": "tab:gray",
-    
+    # simple MPL in comparison with Two-Tower Model
+    ## regression based estimators
+    "Reg-based (simple MLP)": "tab:gray",
+    "Reg-based (Two-Tower)": "tab:blue",
+    ## decision-making based estimators
+    "IPS-PG (simple MLP)": "tab:green",
+    "IPS-PG (Two-Tower)": "tab:red",
     # opl estimator
     "IPS-PG": "tab:green",
     "MIPS-PG": "tab:purple",
@@ -80,7 +85,7 @@ def visualize_mean_squared_error(
     yscale: str = "linear",
 ) -> None:
     plt.style.use("ggplot")
-    
+
     estimators = result_df["estimator"].unique()
     palettes = {estimator: OPE_PALETTE[estimator] for estimator in estimators}
     xvalue = result_df["x"].unique()
@@ -152,11 +157,12 @@ def visualize_mean_squared_error(
     plt.subplots_adjust(top=0.85)
     plt.show()
 
+
 def visualize_cdf_of_ralative_error(
     rel_result_df: DataFrame, baseline: str = "IPS"
 ) -> None:
     plt.style.use("ggplot")
-    
+
     estimators = rel_result_df["estimator"].unique()
     palettes = {estimator: OPE_PALETTE[estimator] for estimator in estimators}
     baseline_se = rel_result_df[rel_result_df["estimator"] == baseline].set_index(
@@ -189,7 +195,7 @@ def visualize_cdf_of_ralative_error(
 
 def visualize_learning_curve(curve_df: DataFrame) -> None:
     plt.style.use("ggplot")
-    
+
     palletes = {k: OPL_PALLETE[k] for k in curve_df.method.unique()}
     fig, ax = plt.subplots(figsize=(10, 6), tight_layout=True)
 
@@ -230,10 +236,10 @@ def visualize_learning_curve(curve_df: DataFrame) -> None:
 
 def visualize_test_value(result_df: DataFrame, x_label: str, x_scale: str) -> None:
     plt.style.use("ggplot")
-    
+
     pallete = {k: OPL_PALLETE[k] for k in result_df.method.unique()}
     x_values = result_df.x.unique()
-    
+
     fig, ax = plt.subplots(figsize=(10, 6), tight_layout=True)
 
     sns.lineplot(
@@ -249,14 +255,14 @@ def visualize_test_value(result_df: DataFrame, x_label: str, x_scale: str) -> No
         data=result_df,
     )
     ax.set_title("Test policy value", fontsize=20)
-    
+
     # xaxis
     ax.set_xscale(x_scale)
     ax.set_xlabel(x_label, fontsize=20)
     ax.set_xticks(x_values)
     ax.set_xticklabels(x_values, fontsize=20)
-    
+
     # legend
     ax.legend(fontsize=15, title="method", title_fontsize=15, loc="best")
-    
+
     plt.show()

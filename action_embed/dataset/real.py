@@ -23,26 +23,24 @@ from obp.dataset import BaseRealBanditDataset
 class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
     n_clusters: int = 30
     random_state: int = 12345
-    
+
     @property
     def n_actions(self) -> int:
         return self.action.max() + 1
 
     def pre_process(self) -> None:
         user_cols = self.data.columns.str.contains("user_feature")
-        context = pd.get_dummies(
-            self.data.loc[:, user_cols], drop_first=True
-        ).values
+        context = pd.get_dummies(self.data.loc[:, user_cols], drop_first=True).values
         self.user_context = np.unique(context, axis=0)
         self.n_users = self.user_context.shape[0]
-        
+
         self.context = np.zeros(len(context), dtype=int)
         for u, user_context_ in enumerate(self.user_context):
             user_mask = np.all(user_context_ == context, axis=1)
             self.context[user_mask] = u
-        
+
         self.fixed_user_context = {u: c for u, c in enumerate(self.user_context)}
-        
+
         len_list_ = self.position.max() + 1
         action_context = (
             self.item_context.drop(columns=["item_id", "item_feature_0"], axis=1)
@@ -52,7 +50,7 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
         action_context = np.repeat(action_context, len_list_, axis=0)
         tiled_position = np.tile(np.arange(len_list_), self.n_actions)
         self.unique_action_context = np.c_[action_context, tiled_position]
-        
+
         self.action = self.position * self.n_actions + self.action
         self.action_context = self.unique_action_context[self.action]
         self.action_context_one_hot = OneHotEncoder(
@@ -61,7 +59,7 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
         self.fixed_action_contexts = {
             a: c for a, c in enumerate(self.action_context_one_hot)
         }
-        
+
         # context-free cluster
         self.cluster = KMeans(
             n_clusters=self.n_clusters, random_state=self.random_state
@@ -75,7 +73,7 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
             self.cluster,
             np.arange(n_actions_all)[None, :],
         ] = 1
-        
+
         self.position = np.zeros_like(self.position)
         self.pscore /= self.position.max() + 1
 
@@ -117,7 +115,7 @@ class ModifiedZOZOTOWNBanditDataset(OpenBanditDataset):
         bandit_feedback["cluster"] = self.cluster[user_idx, bandit_feedback["action"]]
         bandit_feedback["phi_x_a"] = self.cluster[user_idx]
         bandit_feedback["p_c_x_a"] = self.p_c_x_a[user_idx]
-        
+
         return bandit_feedback
 
 
@@ -209,7 +207,7 @@ class ExtremeBanditDataset(BaseRealBanditDataset):
         idx = all_label.sum(axis=0) >= self.min_label_frequency
         all_label = all_label[:, idx]
         self.n_actions = all_label.shape[1]
-        
+
         random_ = check_random_state(self.random_state)
         self.unique_cluster = random_.randint(self.n_clusters, size=self.n_actions)
 

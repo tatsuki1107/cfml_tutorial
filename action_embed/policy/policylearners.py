@@ -8,82 +8,23 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ExponentialLR
-from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from sklearn.utils import check_random_state
 
 from ope.importance_weight import marginal_pscore_over_cluster_spaces
-from ope.importance_weight import marginal_weight_over_cluster_spaces
 from ope.estimator import InversePropensityScore
-from ope.estimator import MarginalizedIPS
-from ope.estimator import OFFCEM
-from utils.lower_bound import estimate_student_t_lower_bound
-
-
-@dataclass
-class RegBasedPolicyDataset(Dataset):
-    context: np.ndarray
-    action: np.ndarray
-    reward: np.ndarray
-
-    def __post_init__(self):
-        """initialize class"""
-        assert (
-            self.context.shape[0]
-            == self.action.shape[0]
-            == self.reward.shape[0]
-        )
-
-    def __getitem__(self, index):
-        return (
-            self.context[index],
-            self.action[index],
-            self.reward[index],
-        )
-
-    def __len__(self):
-        return self.context.shape[0]
-
-
-
-@dataclass
-class GradientBasedPolicyDataset(Dataset):
-    context: np.ndarray
-    action: np.ndarray
-    reward: np.ndarray
-    pscore: np.ndarray
-    q_hat: np.ndarray
-
-    def __post_init__(self):
-        """initialize class"""
-        assert (
-            self.context.shape[0]
-            == self.action.shape[0]
-            == self.reward.shape[0]
-            == self.pscore.shape[0]
-            == self.q_hat.shape[0]
-        )
-
-    def __getitem__(self, index):
-        return (
-            self.context[index],
-            self.action[index],
-            self.reward[index],
-            self.pscore[index],
-            self.q_hat[index],
-        )
-
-    def __len__(self):
-        return self.context.shape[0]
-
-
+from policy.dataset import RegBasedPolicyDataset
+from policy.dataset import GradientBasedPolicyDataset
+from policy.dataset import POTECDataset
+from policy.nn_model import MultiLayerPerceptron as MLP
 
 
 @dataclass
 class BasePolicyLearner(ABC):
-    dim_context: int
-    hidden_layer_size: tuple = (30, 30, 30)
-    activation: str = "elu"
+    nn_model: MLP
+    ope_estimator: InversePropensityScore
+    is_conservative: bool = False
+    delta: float = 0.05
     batch_size: int = 16
     learning_rate_init: float = 0.005
     gamma: float = 0.98
@@ -92,36 +33,17 @@ class BasePolicyLearner(ABC):
     log_eps: float = 1e-10
     solver: str = "adagrad"
     max_iter: int = 30
-    objective: str = "baseline"
+    regularization_type: str = None
+    is_early_stopping: bool = False
     random_state: int = 12345
 
     def __post_init__(self) -> None:
         """Initialize class."""
-        
-        if not self.objective in {"baseline", "CSO"}:
-            raise NotImplementedError
-        
+
         self.random_ = check_random_state(self.random_state)
         self.train_loss = []
-        self.train_value = []
         self.test_value = []
         self.test_estimated_value = []
-        
-        torch.manual_seed(self.random_state)
-        self.input_size = self.dim_context
-
-        if self.activation == "tanh":
-            self.activation_layer = nn.Tanh
-        elif self.activation == "relu":
-            self.activation_layer = nn.ReLU
-        elif self.activation == "elu":
-            self.activation_layer = nn.ELU
-        
-        self.layer_list = []
-        for i, h in enumerate(self.hidden_layer_size):
-            self.layer_list.append(("l{}".format(i), nn.Linear(self.input_size, h)))
-            self.layer_list.append(("a{}".format(i), self.activation_layer()))
-            self.input_size = h
 
     def _init_scheduler(self) -> tuple[ExponentialLR, optim.Optimizer]:
         if self.solver == "adagrad":
@@ -138,14 +60,245 @@ class BasePolicyLearner(ABC):
             )
         else:
             raise NotImplementedError("`solver` must be one of 'adam' or 'adagrad'")
-        
+
         scheduler = ExponentialLR(optimizer, gamma=self.gamma)
-        
+
         return scheduler, optimizer
+
+    def calc_ground_truth_policy_value(
+        self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray
+    ) -> np.float64:
+        return (p_u[:, None] * pi_theta * q_x_a).sum()
+
+    def _judge_early_stopping(self, estimated_policy_value: np.float64) -> bool:
+        if self.test_estimated_value:
+            last_estimated_value = self.test_estimated_value[-1]
+            if estimated_policy_value < last_estimated_value:
+                len_ = self.max_iter - len(self.test_estimated_value)
+                self.test_estimated_value.extend([last_estimated_value] * len_)
+
+                if self.test_value:
+                    last_true_value = self.test_value[-1]
+                    self.test_value.extend([last_true_value] * len_)
+
+                return True
+
+        return False
 
     @abstractmethod
     def fit(self) -> None:
-        pass
+        raise NotImplementedError
+
+    @abstractmethod
+    def predict(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _create_train_data_for_opl(self) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def estimate_policy_value(self) -> None:
+        raise NotImplementedError
+
+
+@dataclass
+class RegBasedPolicyLearner(BasePolicyLearner):
+    """Policy Learner over Action Spaces."""
+
+    def __post_init__(self) -> None:
+        """Initialize class."""
+        super().__post_init__()
+
+        if self.nn_model.objective != "regression":
+            raise ValueError("objective must be regression")
+
+        if self.ope_estimator.decision_making_objective != "action":
+            raise ValueError("decision_making_objective must be action")
+
+    def _create_train_data_for_opl(
+        self, context: np.ndarray, action: np.ndarray, reward: np.ndarray
+    ) -> tuple:
+        dataset = RegBasedPolicyDataset(
+            torch.from_numpy(context).float(),
+            torch.from_numpy(action).long(),
+            torch.from_numpy(reward).float(),
+        )
+
+        data_loader = DataLoader(dataset, batch_size=self.batch_size)
+
+        return data_loader
+
+    def fit(
+        self, dataset: dict, dataset_test: dict, true_dist_dict: Optional[dict] = None
+    ) -> None:
+        context, action, reward = (
+            dataset["context"],
+            dataset["action"],
+            dataset["reward"],
+        )
+        action_context_ = torch.from_numpy(dataset["action_context_one_hot"]).float()
+
+        training_data_loader = self._create_train_data_for_opl(
+            context=context,
+            action=action,
+            reward=reward,
+        )
+
+        # start policy training
+        scheduler, optimizer = self._init_scheduler()
+        for _ in range(self.max_iter):
+            loss_epoch = 0.0
+            self.nn_model.train()
+            for (
+                context_,
+                action_,
+                reward_,
+            ) in training_data_loader:
+                optimizer.zero_grad()
+                q_hat = self.nn_model(context_, action_context_)
+                idx = torch.arange(action_.shape[0], dtype=torch.long)
+                loss = ((reward_ - q_hat[idx, action_]) ** 2).mean()
+                loss.backward()
+                optimizer.step()
+                loss_epoch += loss.item()
+            self.train_loss.append(loss_epoch)
+            scheduler.step()
+
+            pi_test = self.predict(dataset_test)
+            estimated_policy_value = self.estimate_policy_value(
+                data=dataset_test, action_dist=pi_test
+            )
+
+            if self.is_early_stopping:
+                early_stopping_flag = self._judge_early_stopping(estimated_policy_value)
+                if early_stopping_flag:
+                    break
+
+            self.test_estimated_value.append(estimated_policy_value)
+
+            if true_dist_dict is not None:
+                # Note that this is the true policy value, which is not available in practice.
+                policy_value = self.calc_ground_truth_policy_value(
+                    p_u=true_dist_dict["p_u"],
+                    pi_theta=pi_test,
+                    q_x_a=true_dist_dict["q_x_a"],
+                )
+                self.test_value.append(policy_value)
+
+    def predict(self, dataset_test: dict) -> np.ndarray:
+        self.nn_model.eval()
+        context = torch.from_numpy(dataset_test["x_u"]).float()
+        e_a = torch.from_numpy(dataset_test["action_context_one_hot"]).float()
+        q_hat = self.nn_model(context, e_a).detach().numpy()
+        pi = np.zeros_like(q_hat)
+        pi[np.arange(q_hat.shape[0]), np.argmax(q_hat, axis=1)] = 1.0
+
+        return pi
+
+    def estimate_policy_value(self, data: dict, action_dist: np.ndarray) -> np.float64:
+        weight = action_dist[data["user_idx"], data["action"]] / data["pscore"]
+        reward = data["reward"]
+
+        if self.is_conservative:
+            estimated_policy_value = self.ope_estimator.estimate_lower_bound(
+                reward=reward, weight=weight, delta=self.delta
+            )
+        else:
+            estimated_policy_value = self.ope_estimator.estimate_policy_value(
+                weight=weight, reward=reward
+            )
+
+        return estimated_policy_value
+
+
+@dataclass
+class PolicyLearnerOverActionSpaces(BasePolicyLearner):
+    """Policy Learner over Action Spaces."""
+
+    def __post_init__(self) -> None:
+        """Initialize class."""
+        super().__post_init__()
+
+        if self.nn_model.objective != "decision-making":
+            raise ValueError("objective must be decision-making")
+
+        if self.ope_estimator.decision_making_objective != "action":
+            raise ValueError("decision_making_objective must be action")
+
+    def fit(
+        self,
+        dataset: dict,
+        dataset_test: dict,
+        q_hat: Optional[np.ndarray] = None,
+        true_dist_dict: Optional[dict] = None,
+    ) -> None:
+        self.n_actions = dataset["n_actions"]
+        context, action, reward = (
+            dataset["context"],
+            dataset["action"],
+            dataset["reward"],
+        )
+        pscore = dataset["pscore"]
+        action_context_ = torch.from_numpy(dataset["action_context_one_hot"]).float()
+        if q_hat is None:
+            q_hat = np.zeros((reward.shape[0], self.n_actions))
+
+        training_data_loader = self._create_train_data_for_opl(
+            context=context,
+            action=action,
+            reward=reward,
+            pscore=pscore,
+            q_hat=q_hat,
+        )
+
+        # start policy training
+        scheduler, optimizer = self._init_scheduler()
+        for _ in range(self.max_iter):
+            loss_epoch = 0.0
+            self.nn_model.train()
+            for (
+                context_,
+                action_,
+                reward_,
+                pscore_,
+                q_hat_,
+            ) in training_data_loader:
+                optimizer.zero_grad()
+                pi_theta = self.nn_model(context_, action_context_)
+                loss = -self._estimate_policy_gradient(
+                    action=action_,
+                    reward=reward_,
+                    pscore=pscore_,
+                    q_hat=q_hat_,
+                    pi_theta=pi_theta,
+                ).mean()
+                loss.backward()
+                optimizer.step()
+                loss_epoch += loss.item()
+            self.train_loss.append(loss_epoch)
+            scheduler.step()
+
+            pi_test = self.predict(dataset_test)
+            estimated_policy_value = self.estimate_policy_value(
+                data=dataset_test, action_dist=pi_test, q_hat=q_hat
+            )
+
+            if self.is_early_stopping:
+                early_stopping_flag = self._judge_early_stopping(estimated_policy_value)
+                if early_stopping_flag:
+                    break
+
+            self.test_estimated_value.append(estimated_policy_value)
+
+            if true_dist_dict is not None:
+                # Note that this is the true policy value, which is not available in practice.
+                policy_value = self.calc_ground_truth_policy_value(
+                    p_u=true_dist_dict["p_u"],
+                    pi_theta=pi_test,
+                    q_x_a=true_dist_dict["q_x_a"],
+                )
+                self.test_value.append(policy_value)
 
     def _create_train_data_for_opl(
         self,
@@ -170,6 +323,41 @@ class BasePolicyLearner(ABC):
 
         return data_loader
 
+    def estimate_policy_value(
+        self, data: dict, action_dist: np.ndarray, q_hat: np.ndarray
+    ) -> np.float64:
+        weight = action_dist[data["user_idx"], data["action"]] / data["pscore"]
+        action_dist_ = action_dist[data["user_idx"]]
+        reward = data["reward"]
+        q_hat_ = q_hat[data["user_idx"]]
+        q_hat_factual = q_hat[data["user_idx"], data["action"]]
+
+        if self.is_conservative:
+            estimated_policy_value = self.ope_estimator.estimate_lower_bound(
+                reward=reward,
+                weight=weight,
+                q_hat=q_hat_,
+                q_hat_factual=q_hat_factual,
+                action_dist=action_dist_,
+                delta=self.delta,
+            )
+        else:
+            estimated_policy_value = self.ope_estimator.estimate_policy_value(
+                weight=weight,
+                reward=reward,
+                q_hat=q_hat_,
+                q_hat_factual=q_hat_factual,
+                action_dist=action_dist_,
+            )
+
+        return estimated_policy_value
+
+    def predict(self, dataset_test: dict) -> np.ndarray:
+        self.nn_model.eval()
+        context = torch.from_numpy(dataset_test["x_u"]).float()
+        e_a = torch.from_numpy(dataset_test["action_context_one_hot"]).float()
+        return self.nn_model(context, e_a).detach().numpy()
+
     def _estimate_policy_gradient(
         self,
         action: torch.Tensor,
@@ -184,143 +372,84 @@ class BasePolicyLearner(ABC):
 
         q_hat_factual = q_hat[idx, action]
         iw = current_pi[idx, action] / pscore
-        estimated_policy_grad_arr = iw * (reward - q_hat_factual) * log_prob[idx, action]
+        estimated_policy_grad_arr = (
+            iw * (reward - q_hat_factual) * log_prob[idx, action]
+        )
         estimated_policy_grad_arr += torch.sum(q_hat * current_pi * log_prob, dim=1)
 
         # imitation regularization
         estimated_policy_grad_arr += self.imit_reg * log_prob[idx, action]
 
         return estimated_policy_grad_arr
-    
-    @abstractmethod
-    def fit(self) -> None:
-        pass
-
-    @abstractmethod
-    def predict(self) -> np.ndarray:
-        pass
 
 
-class RegBasedPolicyLearner(BasePolicyLearner):
-    """Policy Learner over Action Spaces."""
-    num_actions: int
-    ope_estimator: InversePropensityScore
-    
-    def __init__(self, num_actions: int, ope_estimator: InversePropensityScore, **kwargs) -> None:
-        """Initialize class."""
-        self.num_actions = num_actions
-        self.ope_estimator = ope_estimator
-        super().__init__(**kwargs)
-    
+@dataclass
+class PolicyLearnerOverActionEmbedSpaces(PolicyLearnerOverActionSpaces):
+    """Policy Learner over Action Embedding Spaces."""
+
     def __post_init__(self) -> None:
         """Initialize class."""
         super().__post_init__()
 
-        self.layer_list.append(("output", nn.Linear(self.input_size, self.num_actions)))
-        self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
-    
-    def _create_train_data_for_opl(
+        if self.nn_model.objective != "decision-making":
+            raise ValueError("objective must be decision-making")
+
+        if self.nn_model.name == "two_tower":
+            raise ValueError("nn_model must be mlp")
+
+        if self.ope_estimator.decision_making_objective != "action_context":
+            raise ValueError("decision_making_objective must be action_context")
+
+        self.n_categories = self.nn_model.dim_output
+
+    def fit(
         self,
-        context: np.ndarray,
-        action: np.ndarray,
-        reward: np.ndarray,
-    ) -> tuple:
-        dataset = RegBasedPolicyDataset(
-            torch.from_numpy(context).float(),
-            torch.from_numpy(action).long(),
-            torch.from_numpy(reward).float(),
+        dataset: dict,
+        dataset_test: dict,
+        q_hat: Optional[np.ndarray] = None,
+        true_dist_dict: Optional[dict] = None,
+    ) -> None:
+        self.n_actions = dataset["n_actions"]
+
+        context, category, reward = (
+            dataset["context"],
+            dataset["action_context"],
+            dataset["reward"],
         )
+        pscore_e = dataset["pscore_e"]
 
-        data_loader = DataLoader(dataset, batch_size=self.batch_size)
+        if category.shape[1] != 1:
+            raise NotImplementedError
 
-        return data_loader
-    
-    def fit(self, dataset: dict, dataset_test: dict) -> None:
-        context, action, reward = dataset["context"], dataset["action"], dataset["reward"]
-
-        training_data_loader = self._create_train_data_for_opl(
-            context=context,
-            action=action,
-            reward=reward,
-        )
-
-        # start policy training
-        scheduler, optimizer = self._init_scheduler()
-        q_x_a_train, q_x_a_test = dataset["expected_reward"], dataset_test["expected_reward"]
-        for _ in range(self.max_iter):
-            loss_epoch = 0.0
-            self.nn_model.train()
-            for context_, action_, reward_, in training_data_loader:
-                optimizer.zero_grad()
-                q_hat = self.nn_model(context_)
-                idx = torch.arange(action_.shape[0], dtype=torch.long)
-                loss = ((reward_ - q_hat[idx, action_]) ** 2).mean()
-                loss.backward()
-                optimizer.step()
-                loss_epoch += loss.item()
-            self.train_loss.append(loss_epoch)
-            scheduler.step()
-            pi_train = self.predict(dataset)
-            self.train_value.append((q_x_a_train * pi_train).sum(1).mean())
-            pi_test = self.predict(dataset_test)
-            self.test_value.append((q_x_a_test * pi_test).sum(1).mean())
-    
-    def predict(self, dataset_test: dict) -> np.ndarray:
-
-        self.nn_model.eval()
-        context = torch.from_numpy(dataset_test["context"]).float()
-        q_hat = self.nn_model(context).detach().numpy()
-        pi = np.zeros_like(q_hat)
-        pi[np.arange(q_hat.shape[0]), np.argmax(q_hat, axis=1)] = 1.0
-        
-        return pi
-
-
-class PolicyLearnerOverActionSpaces(BasePolicyLearner):
-    """Policy Learner over Action Spaces."""
-    num_actions: int
-    ope_estimator: InversePropensityScore
-    
-    def __init__(self, num_actions: int, ope_estimator: InversePropensityScore, **kwargs) -> None:
-        """Initialize class."""
-        self.num_actions = num_actions
-        self.ope_estimator = ope_estimator
-        super().__init__(**kwargs)
-    
-    def __post_init__(self) -> None:
-        """Initialize class."""
-        super().__post_init__()
-
-        self.layer_list.append(("output", nn.Linear(self.input_size, self.num_actions)))
-        self.layer_list.append(("softmax", nn.Softmax(dim=1)))
-
-        self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
-    
-    def fit(self, dataset: dict, dataset_test: dict, q_hat: np.ndarray = None) -> None:
-        context, action, reward = dataset["context"], dataset["action"], dataset["reward"]
-        pscore = dataset["pscore"]
         if q_hat is None:
-            q_hat = np.zeros((reward.shape[0], self.num_actions))
+            q_hat = np.zeros((reward.shape[0], self.n_categories))
 
         training_data_loader = self._create_train_data_for_opl(
             context=context,
-            action=action,
+            action=category,
+            action_context=category,
             reward=reward,
-            pscore=pscore,
+            pscore=pscore_e,
             q_hat=q_hat,
         )
 
         # start policy training
         scheduler, optimizer = self._init_scheduler()
-        q_x_a_test, p_u_test = dataset_test["q_x_a"], dataset_test["p_u"]
         for _ in range(self.max_iter):
             loss_epoch = 0.0
             self.nn_model.train()
-            for context_, action_, reward_, pscore_, q_hat_, in training_data_loader:
+            for (
+                context_,
+                category_,
+                _,
+                reward_,
+                pscore_,
+                q_hat_,
+            ) in training_data_loader:
                 optimizer.zero_grad()
                 pi_theta = self.nn_model(context_)
                 loss = -self._estimate_policy_gradient(
-                    action=action_,
+                    action=category_,
                     reward=reward_,
                     pscore=pscore_,
                     q_hat=q_hat_,
@@ -331,253 +460,103 @@ class PolicyLearnerOverActionSpaces(BasePolicyLearner):
                 loss_epoch += loss.item()
             self.train_loss.append(loss_epoch)
             scheduler.step()
-            
-            pi_test = self.compute(dataset_test)
-            estimated_policy_value = self.predict(data=dataset_test, action_dist=pi_test)
-            
-            # Note that this is the true policy value, which is not available in practice.
-            policy_value = self.calc_ground_truth_policy_value(
-                p_u=p_u_test,
-                action_dist=pi_test,
-                q_x_a=q_x_a_test
-            )
-            
-            if self.test_estimated_value:
-                last_estimated_value = self.test_estimated_value[-1]
-                if estimated_policy_value < last_estimated_value:
-                    len_ = self.max_iter - len(self.test_estimated_value)
-                    self.test_estimated_value.extend([last_estimated_value] * len_)
-                    last_true_value = self.test_value[-1]
-                    self.test_value.extend([last_true_value] * len_)
-                    break
-                
-            self.test_estimated_value.append(estimated_policy_value)
-            self.test_value.append(policy_value)
-    
-    def compute(self, dataset_test: dict) -> np.ndarray:
 
-        self.nn_model.eval()
-        context = torch.from_numpy(dataset_test["x_u"]).float()
-        return self.nn_model(context).detach().numpy()
-    
-    def calc_ground_truth_policy_value(
-        self,
-        p_u: np.ndarray,
-        action_dist: np.ndarray, 
-        q_x_a: np.ndarray
-    ) -> np.float64:
-        return (p_u[:, None] * action_dist * q_x_a).sum()
-    
-    def predict(self, data: dict, action_dist: np.ndarray) -> np.float64:
-        
-        weight = action_dist[data["user_idx"], data["action"]] / data["pscore"]
-        reward = data["reward"]
-        
-        estimated_policy_value = self.ope_estimator.estimate_policy_value(
-            weight=weight, reward=reward
-        )
-        
-        if self.objective == "baseline":
-            return estimated_policy_value
-        
-        
-        if self.objective == "CSO":
-            conf = estimate_student_t_lower_bound(
-                x=reward * weight, 
-                delta=0.1,
-                is_both_side=False,
-            )
-            estimated_policy_value -= conf
-        
-        return estimated_policy_value
-
-
-@dataclass(init=False)
-class PolicyLearnerOverActionEmbedSpaces(BasePolicyLearner):
-    """Policy Learner over Action Embedding Spaces."""
-    num_actions: int
-    num_category: int
-    dim_action_context: int
-    ope_estimator: MarginalizedIPS
-    is_discrete: bool = True
-    is_probabilistic: bool = False
-    
-    def __init__(
-        self, 
-        num_actions: int, 
-        num_category: int, 
-        dim_action_context: int,
-        ope_estimator: MarginalizedIPS,
-        **kwargs
-    ) -> None:
-        """Initialize class."""
-        self.num_actions = num_actions
-        self.num_category = num_category
-        self.dim_action_context = dim_action_context
-        self.ope_estimator = ope_estimator
-        super().__init__(**kwargs)
-    
-    def __post_init__(self) -> None:
-        """Initialize class."""
-        super().__post_init__()
-        
-        if self.is_discrete and (not self.is_probabilistic):
-
-            self.layer_list.append(("output", nn.Linear(self.input_size, self.num_category)))
-            self.layer_list.append(("softmax", nn.Softmax(dim=1)))
-
-            self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
-        
-        else:
-            raise NotImplementedError
-    
-    def fit(self, dataset: dict, dataset_test: dict, q_hat: np.ndarray = None) -> None:
-        context, category, reward = dataset["context"], dataset["action_context"], dataset["reward"]
-        pscore_e = dataset["pscore_e"]
-        
-        if category.shape[1] != 1:
-            raise NotImplementedError
-        
-        category = category.reshape(-1)
-        
-        if q_hat is None:
-            q_hat = np.zeros((reward.shape[0], self.num_category))
-
-        training_data_loader = self._create_train_data_for_opl(
-            context=context,
-            action=category,
-            reward=reward,
-            pscore=pscore_e,
-            q_hat=q_hat,
-        )
-
-        # start policy training
-        scheduler, optimizer = self._init_scheduler()
-        q_x_a_train, q_x_a_test = dataset["expected_reward"], dataset_test["expected_reward"]
-        for _ in range(self.max_iter):
-            loss_epoch = 0.0
-            self.nn_model.train()
-            for context_, category_, reward_, pscore_e_, q_hat_, in training_data_loader:
-                optimizer.zero_grad()
-                pi_theta = self.nn_model(context_)
-                loss = -self._estimate_policy_gradient(
-                    action=category_,
-                    reward=reward_,
-                    pscore=pscore_e_,
-                    q_hat=q_hat_,
-                    pi_theta=pi_theta,
-                ).mean()
-                loss.backward()
-                optimizer.step()
-                loss_epoch += loss.item()
-            self.train_loss.append(loss_epoch)
-            scheduler.step()
-            pi_train = self.predict(dataset)
-            self.train_value.append((q_x_a_train * pi_train).sum(1).mean())
             pi_test = self.predict(dataset_test)
-            self.test_value.append((q_x_a_test * pi_test).sum(1).mean())
-    
-    def predict(self, dataset: dict) -> np.ndarray:
+            estimated_policy_value = self.estimate_policy_value(
+                data=dataset_test, action_dist=pi_test
+            )
 
+            if self.is_early_stopping:
+                early_stopping_flag = self._judge_early_stopping(estimated_policy_value)
+                if early_stopping_flag:
+                    break
+
+            self.test_estimated_value.append(estimated_policy_value)
+
+            if true_dist_dict is not None:
+                # Note that this is the true policy value, which is not available in practice.
+                policy_value = self.calc_ground_truth_policy_value(
+                    p_u=true_dist_dict["p_u"],
+                    pi_theta=pi_test,
+                    q_x_a=true_dist_dict["q_x_a"],
+                )
+                self.test_value.append(policy_value)
+
+    def predict(self, dataset: dict) -> np.ndarray:
         self.nn_model.eval()
-        context = torch.from_numpy(dataset["context"]).float()
+        context = torch.from_numpy(dataset["x_u"]).float()
         p_e_x_pi_theta = self.nn_model(context).detach().numpy()
-        
-        n_rounds, e_a = dataset["n_rounds"], dataset["e_a"]
-        overall_policy = np.zeros((n_rounds, self.num_actions))
-        
+
+        n_rounds, e_a = dataset["n_users"], dataset["e_a"]
+        overall_policy = np.zeros((n_rounds, self.n_actions))
+
         best_actions_given_x_c = []
-        for e in range(self.num_category):
+        for e in range(self.n_categories):
             # Assumption of no direct effect.
-            best_action_given_x_c = self.random_.choice(np.where(e_a == e)[0], size=n_rounds)
+            best_action_given_x_c = self.random_.choice(
+                np.where(e_a == e)[0], size=n_rounds
+            )
             best_actions_given_x_c.append(best_action_given_x_c)
-        
+
         best_actions_given_x_c = np.array(best_actions_given_x_c).T
-        overall_policy[np.arange(n_rounds)[:, None], best_actions_given_x_c] = p_e_x_pi_theta
-        
+        overall_policy[
+            np.arange(n_rounds)[:, None], best_actions_given_x_c
+        ] = p_e_x_pi_theta
+
         return overall_policy
 
 
 @dataclass
-class POTECDataset(Dataset):
-    context: np.ndarray
-    action: np.ndarray
-    reward: np.ndarray
-    pscore: np.ndarray
-    f_hat: np.ndarray
-    pi_a_x_c: np.ndarray
-
-    def __post_init__(self):
-        """initialize class"""
-        assert (
-            self.context.shape[0]
-            == self.action.shape[0]
-            == self.reward.shape[0]
-            == self.pscore.shape[0]
-            == self.f_hat.shape[0]
-            == self.pi_a_x_c.shape[0]
-        )
-
-    def __getitem__(self, index):
-        return (
-            self.context[index],
-            self.action[index],
-            self.reward[index],
-            self.pscore[index],
-            self.f_hat[index],
-            self.pi_a_x_c[index],
-        )
-
-    def __len__(self):
-        return self.context.shape[0]
-
-
 class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
     """Policy Learner over Action Embedding Spaces."""
-    num_actions: int
-    num_clusters: int
-    ope_estimator: OFFCEM
-    
-    def __init__(
-        self, 
-        num_actions: int, 
-        num_clusters: int,
-        ope_estimator: OFFCEM,
-        **kwargs
-    ) -> None:
-        """Initialize class."""
-        self.num_actions = num_actions
-        self.num_clusters = num_clusters
-        self.ope_estimator = ope_estimator
-        super().__init__(**kwargs)
-    
+
     def __post_init__(self) -> None:
         """Initialize class."""
         super().__post_init__()
 
-        self.layer_list.append(("output", nn.Linear(self.input_size, self.num_clusters)))
-        self.layer_list.append(("softmax", nn.Softmax(dim=1)))
+        if self.nn_model.objective != "decision-making":
+            raise ValueError("objective must be decision-making")
 
-        self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
-    
+        if self.nn_model.name == "two_tower":
+            raise ValueError("nn_model must be mlp")
+
+        if self.ope_estimator.decision_making_objective != "cluster":
+            raise ValueError("decision_making_objective must be cluster")
+
     def fit(
-        self, 
-        dataset: dict, 
-        dataset_test: dict, 
-        f_hat: np.ndarray = None ,
-        f_hat_test: np.ndarray = None
+        self,
+        dataset: dict,
+        dataset_test: dict,
+        f_hat: Optional[np.ndarray] = None,
+        true_dist_dict: Optional[dict] = None,
     ) -> None:
-        context, action, reward = dataset["context"], dataset["action"], dataset["reward"]
+        self.n_actions, self.n_clusters = (
+            dataset["n_actions"],
+            dataset["n_learned_clusters"],
+        )
+
+        context, action, reward = (
+            dataset["context"],
+            dataset["action"],
+            dataset["reward"],
+        )
         phi_a = dataset["phi_x_a"][0]
-        
-        pscore = marginal_pscore_over_cluster_spaces(dataset)
-        test_pscore = marginal_pscore_over_cluster_spaces(dataset_test)
-        
+
+        pscore = marginal_pscore_over_cluster_spaces(
+            pi_b=dataset["pi_b"],
+            cluster=dataset["cluster"],
+            phi_x_a=dataset["phi_x_a"],
+        )
+        test_pscore = marginal_pscore_over_cluster_spaces(
+            pi_b=dataset_test["pi_b"],
+            cluster=dataset_test["cluster"],
+            phi_x_a=dataset_test["phi_x_a"],
+        )
+
         if f_hat is None:
-            f_hat = np.zeros((reward.shape[0], self.num_actions))
-        
-        if f_hat_test is None:
-            f_hat_test = np.zeros((dataset_test["n_rounds"], self.num_actions))
+            f_hat = np.zeros((dataset["n_users"], self.n_actions))
+
+        f_hat_train = f_hat[dataset["user_idx"]]
 
         training_data_loader = self._create_train_data_for_opl(
             context=context,
@@ -585,20 +564,25 @@ class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
             phi_a=phi_a,
             reward=reward,
             pscore=pscore,
-            f_hat=f_hat,
+            f_hat=f_hat_train,
         )
-        test_pi_a_x_c = self._calc_2nd_stage_action_dist(f_hat=f_hat_test, phi_a=phi_a)
+        pi_a_x_c = self._calc_2nd_stage_action_dist(f_hat=f_hat, phi_a=phi_a)
 
         # start policy training
         scheduler, optimizer = self._init_scheduler()
-        context_test, q_x_a_test = dataset_test["context"], dataset_test["expected_reward"]
-        p_x_test = dataset_test["p_u"]
         for _ in range(self.max_iter):
             loss_epoch = 0.0
             self.nn_model.train()
-            for context_, action_, reward_, pscore_, f_hat_, pi_a_x_c_ in training_data_loader:
+            for (
+                context_,
+                action_,
+                reward_,
+                pscore_,
+                f_hat_,
+                pi_a_x_c_,
+            ) in training_data_loader:
                 optimizer.zero_grad()
-                
+
                 pi_theta = self.nn_model(context_)
                 loss = -self._estimate_policy_gradient(
                     action=action_,
@@ -615,35 +599,43 @@ class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
                 loss_epoch += loss.item()
             self.train_loss.append(loss_epoch)
             scheduler.step()
-            
-            
-            cluster_dist = self.compute(context_test)
-            estimated_policy_value = self.predict(
+
+            cluster_dist = self.predict(dataset_test)
+            pi_overall = self.predict_overall(dataset_test, pi_a_x_c)
+            estimated_policy_value = self.estimate_policy_value(
                 dataset_test=dataset_test,
                 cluster_dist=cluster_dist,
-                f_hat=f_hat_test,
-                pi_a_x_c=test_pi_a_x_c,
-                pscore=test_pscore
+                f_hat=f_hat,
+                pi_overall=pi_overall,
+                pscore=test_pscore,
             )
+
+            if self.is_early_stopping:
+                early_stopping_flag = self._judge_early_stopping(estimated_policy_value)
+                if early_stopping_flag:
+                    break
             self.test_estimated_value.append(estimated_policy_value)
 
-            # Note that this is the true policy value, which is not available in practice.
-            pi_test = self.compute_overall(context=context_test, pi_a_x_c=test_pi_a_x_c)
-            policy_value = self.calc_ground_truth_policy_value(action_dist=pi_test, q_x_a=q_x_a_test)
-            self.test_value.append(policy_value)
-    
+            if true_dist_dict is not None:
+                # Note that this is the true policy value, which is not available in practice.
+                policy_value = self.calc_ground_truth_policy_value(
+                    p_u=true_dist_dict["p_u"],
+                    pi_theta=pi_overall,
+                    q_x_a=true_dist_dict["q_x_a"],
+                )
+                self.test_value.append(policy_value)
+
     def _create_train_data_for_opl(
-        self, 
-        context: np.ndarray, 
+        self,
+        context: np.ndarray,
         action: np.ndarray,
         phi_a: np.ndarray,
-        reward: np.ndarray, 
-        pscore: np.ndarray, 
+        reward: np.ndarray,
+        pscore: np.ndarray,
         f_hat: np.ndarray,
     ) -> DataLoader:
-        
         pi_a_x_c = self._calc_2nd_stage_action_dist(f_hat=f_hat, phi_a=phi_a)
-        
+
         dataset = POTECDataset(
             torch.from_numpy(context).float(),
             torch.from_numpy(action).long(),
@@ -652,25 +644,25 @@ class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
             torch.from_numpy(f_hat).float(),
             torch.from_numpy(pi_a_x_c).float(),
         )
-        
+
         data_loader = DataLoader(dataset, batch_size=self.batch_size)
-        
+
         return data_loader
-    
+
     def _calc_2nd_stage_action_dist(self, f_hat: np.ndarray, phi_a) -> np.ndarray:
-        action_set = np.arange(self.num_actions)
+        action_set = np.arange(self.n_actions)
         datasize = f_hat.shape[0]
-        
-        pi_a_x_c = np.zeros((datasize, self.num_actions, self.num_clusters))
-        for c in range(self.num_clusters):
+
+        pi_a_x_c = np.zeros((datasize, self.n_actions, self.n_clusters))
+        for c in range(self.n_clusters):
             action_mask = phi_a == c
             # assumption of context-free cluster
             a_given_c = f_hat[:, action_mask].argmax(1)
             best_action_given_c = action_set[action_mask][a_given_c]
-            pi_a_x_c[np.arange(datasize), best_action_given_c, c] = 1.
-        
+            pi_a_x_c[np.arange(datasize), best_action_given_c, c] = 1.0
+
         return pi_a_x_c
-    
+
     def _estimate_policy_gradient(
         self,
         action: torch.Tensor,
@@ -688,8 +680,10 @@ class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
         f_hat_factual = f_hat[idx, action]
         cluster = phi_a[action]
         iw = current_pi[idx, cluster] / pscore
-        estimated_policy_grad_arr = iw * (reward - f_hat_factual) * log_prob[idx, cluster]
-        
+        estimated_policy_grad_arr = (
+            iw * (reward - f_hat_factual) * log_prob[idx, cluster]
+        )
+
         f_hat_c = torch.sum(f_hat[:, :, None] * pi_a_x_c, dim=1)
         estimated_policy_grad_arr += torch.sum(f_hat_c * current_pi * log_prob, dim=1)
 
@@ -697,73 +691,78 @@ class PolicyLearnerOverClusterSpaces(BasePolicyLearner):
         estimated_policy_grad_arr += self.imit_reg * log_prob[idx, cluster]
 
         return estimated_policy_grad_arr
-    
-    def compute(self, context: np.ndarray) -> np.ndarray:
 
+    def predict(self, dataset: dict) -> np.ndarray:
         self.nn_model.eval()
-        context = torch.from_numpy(context).float()
+        context = torch.from_numpy(dataset["x_u"]).float()
         pi_theta = self.nn_model(context).detach().numpy()
-        
         return pi_theta
-    
-    def compute_overall(self, context: np.ndarray, pi_a_x_c: np.ndarray) -> np.ndarray:
 
-        pi_theta = self.compute(context)
+    def predict_overall(self, dataset: dict, pi_a_x_c: np.ndarray) -> np.ndarray:
+        pi_theta = self.predict(dataset)
         overall_policy = (pi_theta[:, None, :] * pi_a_x_c).sum(2)
-        
+
         return overall_policy
-    
-    def calc_ground_truth_policy_value(self, action_dist: np.ndarray, q_x_a: np.ndarray) -> np.float64:
-        return np.average(q_x_a, weights=action_dist, axis=1).mean()
-    
-    def predict(
-        self, 
-        dataset_test: dict, 
+
+    def estimate_policy_value(
+        self,
+        dataset_test: dict,
         cluster_dist: np.ndarray,
-        pscore: np.ndarray, 
+        pscore: np.ndarray,
         f_hat: np.ndarray,
-        pi_a_x_c: np.ndarray
+        pi_overall: np.ndarray,
     ) -> np.float64:
-        
-        data_idx = np.arange(dataset_test["n_rounds"])
+        user_idx, reward = dataset_test["user_idx"], dataset_test["reward"]
         action, cluster = dataset_test["action"], dataset_test["cluster"]
-        weight = cluster_dist[data_idx, cluster] / pscore
-        estimated_policy_value = self.ope_estimator.estimate_policy_value(
-            reward=dataset_test["reward"],
-            weight=weight,
-            f_hat=f_hat,
-            f_hat_factual=f_hat[data_idx, action],
-            cluster_dist=cluster_dist,
-            action_dist=pi_a_x_c,
-        )
-        
+        weight = cluster_dist[user_idx, cluster] / pscore
+        f_hat_ = f_hat[user_idx]
+        f_hat_factual = f_hat[user_idx, action]
+        pi_overall_ = pi_overall[user_idx]
+
+        if self.is_conservative:
+            estimated_policy_value = self.ope_estimator.estimate_lower_bound(
+                reward=reward,
+                weight=weight,
+                f_hat=f_hat_,
+                f_hat_factual=f_hat_factual,
+                action_dist=pi_overall_,
+                delta=self.delta,
+            )
+        else:
+            estimated_policy_value = self.ope_estimator.estimate_policy_value(
+                reward=reward,
+                weight=weight,
+                f_hat=f_hat_,
+                f_hat_factual=f_hat_factual,
+                action_dist=pi_overall_,
+            )
+
         return estimated_policy_value
 
 
+@dataclass
 class TruePolicyLearner(BasePolicyLearner):
     """Policy Learner over Action Spaces."""
-    num_actions: int
-    regularization_type: str = None
-    
-    def __init__(self, num_actions: int, regularization_type: str = None, **kwargs) -> None:
-        """Initialize class."""
-        self.num_actions = num_actions
-        self.regularization_type = regularization_type
-        super().__init__(**kwargs)
-    
+
     def __post_init__(self) -> None:
         """Initialize class."""
         super().__post_init__()
 
-        self.layer_list.append(("output", nn.Linear(self.input_size, self.num_actions)))
-        self.layer_list.append(("softmax", nn.Softmax(dim=1)))
+        if self.nn_model.objective != "decision-making":
+            raise ValueError("objective must be decision-making")
 
-        self.nn_model = nn.Sequential(OrderedDict(self.layer_list))
-        
+        if self.nn_model.name != "mlp":
+            raise ValueError("nn_model must be mlp")
+
         self.new1_value, self.new2_value = [], []
-    
-    def fit(self, p_u: np.ndarray, x_u: np.ndarray, q_x_a: np.ndarray, squared_q_x_a: np.ndarray) -> None:
-        
+
+    def fit(
+        self,
+        p_u: np.ndarray,
+        x_u: np.ndarray,
+        q_x_a: np.ndarray,
+        squared_q_x_a: np.ndarray,
+    ) -> None:
         p_u_ = torch.from_numpy(p_u).float()
         x_u_ = torch.from_numpy(x_u).float()
         q_x_a_ = torch.from_numpy(q_x_a).float()
@@ -776,10 +775,7 @@ class TruePolicyLearner(BasePolicyLearner):
             optimizer.zero_grad()
             pi_theta = self.nn_model(x_u_)
             loss = -self._calc_policy_gradient(
-                p_u=p_u_,
-                pi_theta=pi_theta,
-                q_x_a=q_x_a_,
-                squared_q_x_a=squared_q_x_a_
+                p_u=p_u_, pi_theta=pi_theta, q_x_a=q_x_a_, squared_q_x_a=squared_q_x_a_
             )
 
             loss.backward()
@@ -789,73 +785,82 @@ class TruePolicyLearner(BasePolicyLearner):
             scheduler.step()
 
             pi_theta = self.predict(x_u=x_u)
-            
-            policy_value = self.calc_ground_truth_policy_value(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a)
+
+            policy_value = self.calc_ground_truth_policy_value(
+                p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a
+            )
             self.test_value.append(policy_value)
-            Var_u_a_r = self.calc_var_all(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a, squared_q_x_a=squared_q_x_a)
+            Var_u_a_r = self.calc_var_all(
+                p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a, squared_q_x_a=squared_q_x_a
+            )
             self.new1_value.append(Var_u_a_r)
             Var_u_E_a_r = self.calc_var_u(p_u=p_u, pi_theta=pi_theta, q_x_a=q_x_a)
             self.new2_value.append(Var_u_E_a_r)
-    
-    def predict(self, x_u: np.ndarray) -> np.ndarray:
 
+    def predict(self, x_u: np.ndarray) -> np.ndarray:
         self.nn_model.eval()
         x_u_ = torch.from_numpy(x_u).float()
         pi_theta = self.nn_model(x_u_).detach().numpy()
-        
+
         return pi_theta
-    
-    def calc_ground_truth_policy_value(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray) -> np.float64:
-        return (p_u[:, None] * pi_theta * q_x_a).sum()
-    
-    def calc_var_all(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray, squared_q_x_a: np.ndarray) -> np.float64:
+
+    def calc_var_all(
+        self,
+        p_u: np.ndarray,
+        pi_theta: np.ndarray,
+        q_x_a: np.ndarray,
+        squared_q_x_a: np.ndarray,
+    ) -> np.float64:
         squared_policy_value = (p_u[:, None] * pi_theta * squared_q_x_a).sum()
         policy_value = (p_u[:, None] * pi_theta * q_x_a).sum()
-        variance_all = squared_policy_value - (policy_value ** 2)
+        variance_all = squared_policy_value - (policy_value**2)
         return variance_all
-    
-    def calc_var_u(self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray) -> np.float64:
+
+    def calc_var_u(
+        self, p_u: np.ndarray, pi_theta: np.ndarray, q_x_a: np.ndarray
+    ) -> np.float64:
         q_u = (pi_theta * q_x_a).sum(1)
         policy_value = (p_u * q_u).sum()
-        variance_u = (p_u * (q_u ** 2)).sum() - (policy_value ** 2)
+        variance_u = (p_u * (q_u**2)).sum() - (policy_value**2)
         return variance_u
 
-    
     def _calc_policy_gradient(
         self,
         p_u: torch.Tensor,
         pi_theta: torch.Tensor,
         q_x_a: torch.Tensor,
-        squared_q_x_a: Optional[torch.Tensor] = None
+        squared_q_x_a: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         current_pi = pi_theta.detach()
         log_prob = torch.log(pi_theta + self.log_eps)
-        
+
         policy_gradient = (p_u[:, None] * current_pi * q_x_a * log_prob).sum()
-        
+
         if self.regularization_type is None:
             return policy_gradient
-        
+
         # regularization
         # (cfml本 章末問題 5.4)
         if self.regularization_type == "all_variance":
-            squared_policy_gradient = (p_u[:, None] * current_pi * squared_q_x_a * log_prob).sum()
+            squared_policy_gradient = (
+                p_u[:, None] * current_pi * squared_q_x_a * log_prob
+            ).sum()
             policy_value = (p_u[:, None] * current_pi * q_x_a).sum()
             reg_term = squared_policy_gradient - 2 * policy_value * policy_gradient
-        
+
         elif self.regularization_type == "x_variance":
             q_x = (current_pi * q_x_a).sum(1)
             nabla_q_x_a = (current_pi * q_x_a * log_prob).sum(1)
             first_term = 2 * (p_u * q_x * nabla_q_x_a).sum()
-            
+
             policy_value = (p_u[:, None] * current_pi * q_x_a).sum()
             second_term = 2 * policy_value * policy_gradient
-            
+
             reg_term = first_term - second_term
-        
+
         else:
             raise NotImplementedError
-        
+
         policy_gradient = policy_gradient - reg_term
-        
+
         return policy_gradient

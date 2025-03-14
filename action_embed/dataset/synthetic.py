@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 from sklearn.utils import check_random_state
@@ -6,7 +7,6 @@ from sklearn.preprocessing import OneHotEncoder
 from obp.utils import softmax, sample_action_fast
 from obp.dataset import linear_behavior_policy
 from obp.dataset import linear_reward_function
-from obp.dataset import polynomial_reward_function
 from obp.dataset import BaseBanditDataset
 from scipy.stats import rankdata
 
@@ -124,30 +124,6 @@ class SyntheticBanditDatasetWithActionEmbeds(BaseBanditDataset):
         return np.average(expected_reward, weights=evaluation_policy, axis=1).mean()
 
 
-def cluster_effect_function(
-    context: np.ndarray,
-    cluster_context: np.ndarray,
-    random_state: int,
-) -> np.ndarray:
-    g_x_e = polynomial_reward_function(
-        context=context,
-        action_context=cluster_context,
-        random_state=random_state,
-    )
-    random_ = check_random_state(random_state)
-    (a, b, c, d) = random_.uniform(-3, 3, size=4)
-    x_a = 1 / context[:, :3].mean(axis=1)
-    x_b = 1 / context[:, 2:8].mean(axis=1)
-    x_c = context[:, 1:3].mean(axis=1)
-    x_d = context[:, 5:].mean(axis=1)
-    g_x_e += a * (x_a[:, np.newaxis] < 1.5)
-    g_x_e += b * (x_b[:, np.newaxis] < -0.5)
-    g_x_e += c * (x_c[:, np.newaxis] > 3.0)
-    g_x_e += d * (x_d[:, np.newaxis] < 1.0)
-
-    return g_x_e
-
-
 def sigmoid(x: np.ndarray) -> np.ndarray:
     return 1 / (1 + np.exp(-x))
 
@@ -168,12 +144,11 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
     random_state: int = 12345
 
     def __post_init__(self) -> None:
-        
         # p_u
         random_ = check_random_state(self.random_state)
         p_u_logits = random_.normal(size=self.n_users)
         self.p_u = softmax(self.beta_user * p_u_logits[None, :])[0]
-        
+
         random_ = check_random_state(self.random_state)
         # x_u
         self.user_contexts = random_.normal(size=(self.n_users, self.dim_context))
@@ -198,103 +173,126 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             a: c for a, c in enumerate(self.action_context_one_hot)
         }
 
-        self.clusters = linear_behavior_policy(
+        self.true_clusters = linear_behavior_policy(
             context=self.action_context_one_hot,
             action_context=np.eye(self.n_clusters),
             random_state=self.random_state,
         ).argmax(1)
-        self.n_clusters = np.unique(self.clusters).shape[0]
-        self.clusters = rankdata(-self.clusters, method="dense") - 1
+        self.n_true_clusters = np.unique(self.true_clusters).shape[0]
+        self.true_clusters = rankdata(-self.true_clusters, method="dense") - 1
         # context-free cluster
-        self.clusters = np.tile(self.clusters, reps=(self.n_users, 1))
-        # note that the cluster is deterministic
-        self.p_c_x_a = np.zeros((self.n_users, self.n_clusters, self.n_actions))
-        self.p_c_x_a[
-            np.arange(self.n_users)[:, None],
-            self.clusters,
-            np.arange(self.n_actions)[None, :],
-        ] = 1
+        self.true_clusters = np.tile(self.true_clusters, reps=(self.n_users, 1))
 
-        self.g_x_c = cluster_effect_function(
+        self.g_x_c = linear_reward_function(
             context=self.user_contexts,
-            cluster_context=np.eye(self.n_clusters),
+            action_context=np.eye(self.n_true_clusters),
             random_state=self.random_state,
         )
-        self.g_x_c = sigmoid(self.g_x_c)
-        
-        g_x_c_a = self.g_x_c[np.arange(self.n_users)[:, None], self.clusters]
+        self.g_x_c = (self.g_x_c - self.g_x_c.mean()) / self.g_x_c.std()
+        self.g_x_c -= self.g_x_c.min()
+
+        g_x_c_a = self.g_x_c[np.arange(self.n_users)[:, None], self.true_clusters]
 
         self.h_x_a = linear_reward_function(
             context=self.user_contexts,
             action_context=self.action_context_one_hot,
             random_state=self.random_state,
         )
-        self.h_x_a = sigmoid(self.h_x_a)
+        self.h_x_a = (self.h_x_a - self.h_x_a.mean()) / self.h_x_a.std()
+        self.h_x_a -= self.h_x_a.min()
 
         # conjunct effect model (CEM)
         self.q_x_a = self.h_x_a + g_x_c_a
-        
+
+        # \pi_0(a|x)
+        self._define_logging_policy()
+
         if self.reward_type == "continuous":
             # define the reward variance
             random_ = check_random_state(self.random_state)
             eps = 1e-6
-            self.sigma_x_a = random_.uniform(0, self.reward_noise, size=(self.n_users, self.n_actions)) + eps
-            self.squared_q_x_a = self.sigma_x_a ** 2 + self.q_x_a ** 2
-        
+            self.sigma_x_a = (
+                random_.uniform(
+                    0, self.reward_noise, size=(self.n_users, self.n_actions)
+                )
+                + eps
+            )
+            self.squared_q_x_a = self.sigma_x_a**2 + self.q_x_a**2
+
         elif self.reward_type == "binary":
             self.q_x_a = sigmoid(self.q_x_a)
             self.squared_q_x_a = self.q_x_a
             self.sigma_x_a = np.sqrt(self.q_x_a * (1 - self.q_x_a))
-        
+
         else:
             raise ValueError("reward_type must be either 'continuous' or 'binary'")
 
+        self.true_dist_dict = {
+            "p_u": self.p_u,
+            "pi_0_a_x": self.pi_0_a_x,
+            "q_x_a": self.q_x_a,
+            "h_x_a": self.h_x_a,
+            "g_x_c": self.g_x_c,
+            "squared_q_x_a": self.squared_q_x_a,
+            "phi_x_a": self.true_clusters,
+            "n_clusters": self.n_true_clusters,
+        }
+
         self.random_ = check_random_state(self.random_state)
+
+    def _define_logging_policy(self) -> None:
+        random_ = check_random_state(self.random_state)
+        if self.n_deficient_actions > 0:
+            self.pi_0_a_x = np.zeros_like(self.q_x_a)
+            n_supported_actions = self.n_actions - self.n_deficient_actions
+            supported_actions = np.argsort(
+                random_.gumbel(size=(self.n_users, self.n_actions)), axis=1
+            )[:, ::-1][:, :n_supported_actions]
+            supported_actions_idx = (
+                np.tile(np.arange(self.n_users), (n_supported_actions, 1)).T,
+                supported_actions,
+            )
+            self.pi_0_a_x[supported_actions_idx] = softmax(
+                self.beta * self.q_x_a[supported_actions_idx]
+            )
+        else:
+            self.pi_0_a_x = softmax(self.beta * self.q_x_a)
 
     def obtain_batch_bandit_feedback(self, n_rounds: int) -> dict:
         # x ~ p(x)
         user_idx = self.random_.choice(self.n_users, size=n_rounds, p=self.p_u)
         context = self.user_contexts[user_idx]
 
-        q_x_a = self.q_x_a[user_idx]
-        if self.n_deficient_actions > 0:
-            pi_b = np.zeros_like(q_x_a)
-            n_supported_actions = self.n_actions - self.n_deficient_actions
-            supported_actions = np.argsort(
-                self.random_.gumbel(size=(n_rounds, self.n_actions)), axis=1
-            )[:, ::-1][:, :n_supported_actions]
-            supported_actions_idx = (
-                np.tile(np.arange(n_rounds), (n_supported_actions, 1)).T,
-                supported_actions,
-            )
-            pi_b[supported_actions_idx] = softmax(
-                self.beta * q_x_a[supported_actions_idx]
-            )
-        else:
-            pi_b = softmax(self.beta * q_x_a)
-
         # a ~ \pi_b(\cdot|x_u)
+        pi_b = self.pi_0_a_x[user_idx]
         actions = sample_action_fast(pi_b)
 
-        clusters = self.clusters[user_idx, actions]
+        phi_a = train_contextfree_cluster(
+            n_actions=self.n_actions,
+            n_clusters=self.n_clusters,
+            random_state=self.random_state,
+        )
+        learned_phi_x_a = np.tile(phi_a, reps=(self.n_users, 1))
+        learned_clusters = learned_phi_x_a[user_idx, actions]
 
         # e ~ p(\cdot|x_u,a)
         action_contexts = self.action_contexts[actions]
 
         # r ~ p(r|x_u,a)
-        expected_reward_factual = q_x_a[np.arange(n_rounds), actions]
-        
+        expected_reward_factual = self.q_x_a[user_idx, actions]
+
         if self.reward_type == "continuous":
             reward_noise_factual = self.sigma_x_a[user_idx, actions]
             rewards = self.random_.normal(expected_reward_factual, reward_noise_factual)
-        
+
         elif self.reward_type == "binary":
             rewards = self.random_.binomial(n=1, p=expected_reward_factual)
 
         return dict(
+            n_users=self.n_users,
             n_rounds=n_rounds,
             n_actions=self.n_actions,
-            n_clusters=self.n_clusters,
+            n_learned_clusters=self.n_clusters,
             user_idx=user_idx,
             context=context,
             fixed_user_context=self.fixed_user_contexts,
@@ -302,20 +300,27 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
             action_context=action_contexts,
             action_context_one_hot=self.action_context_one_hot,
             fixed_action_context=self.fixed_action_contexts,
-            cluster=clusters,
+            cluster=learned_clusters,
             reward=rewards,
             pscore=pi_b[np.arange(n_rounds), actions],
-            expected_reward=self.q_x_a[user_idx],
-            h_x_a=self.h_x_a[user_idx],
-            g_x_c=self.g_x_c[user_idx],
             pi_b=pi_b,
             p_e_d_a=self.p_e_d_a,
-            p_c_x_a=self.p_c_x_a[user_idx],
-            phi_x_a=self.clusters[user_idx],
-            p_u=self.p_u,
+            phi_x_a=learned_phi_x_a,
             x_u=self.user_contexts,
-            q_x_a=self.q_x_a,
+            # unknown data
+            n_true_clusters=self.n_true_clusters,
+            true_phi_x_a=self.true_clusters[user_idx],
+            true_cluster=self.true_clusters[user_idx, actions],
         )
 
     def calc_ground_truth_policy_value(self, pi_e: np.ndarray) -> np.float64:
         return (self.p_u[:, None] * pi_e * self.q_x_a).sum()
+
+
+def train_contextfree_cluster(
+    n_actions: int, n_clusters: int, random_state: Optional[int] = None
+) -> np.ndarray:
+    random_ = check_random_state(random_state)
+
+    phi_a = random_.randint(n_clusters, size=n_actions)
+    return phi_a

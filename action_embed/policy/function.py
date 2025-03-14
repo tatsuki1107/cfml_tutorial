@@ -20,5 +20,3 @@ def gen_eps_greedy(
     pol += eps / expected_reward.shape[1]
 
     return pol
-
-
