@@ -149,7 +149,8 @@ class PairWiseRegression:
         r2: torch.Tensor,
     ) -> torch.Tensor:
         h_hat = self.nn_model(x)
-        h_hat1, h_hat2 = h_hat[:, a1], h_hat[:, a2]
+        idx = torch.arange(x.size(0))
+        h_hat1, h_hat2 = h_hat[idx, a1], h_hat[idx, a2]
         loss = ((r1 - r2) - (h_hat1 - h_hat2)) ** 2
 
         return loss.mean()
