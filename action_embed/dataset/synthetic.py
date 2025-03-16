@@ -229,6 +229,7 @@ class SyntheticBanditDatasetWithCluster(BaseBanditDataset):
 
         self.true_dist_dict = {
             "p_u": self.p_u,
+            "x_u": self.user_contexts,
             "pi_0_a_x": self.pi_0_a_x,
             "q_x_a": self.q_x_a,
             "h_x_a": self.h_x_a,

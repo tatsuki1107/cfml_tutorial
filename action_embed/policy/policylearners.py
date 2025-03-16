@@ -864,3 +864,9 @@ class TruePolicyLearner(BasePolicyLearner):
         policy_gradient = policy_gradient - reg_term
 
         return policy_gradient
+    
+    def _create_train_data_for_opl(self):
+        pass
+    
+    def estimate_policy_value(self):
+        pass

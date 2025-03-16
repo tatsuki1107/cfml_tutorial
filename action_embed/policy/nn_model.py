@@ -95,15 +95,6 @@ class TwoTowerModel(nn.Module):
         self.random_state = random_state
         self.name = "two_tower"
 
-        if self.activation == "tanh":
-            self.activation_layer = nn.Tanh
-        elif self.activation == "relu":
-            self.activation_layer = nn.ReLU
-        elif self.activation == "elu":
-            self.activation_layer = nn.ELU
-        else:
-            raise NotImplementedError
-
         if not self.objective in ["regression", "decision-making"]:
             raise ValueError("objective must be either regression or decision-making")
 
@@ -113,7 +104,6 @@ class TwoTowerModel(nn.Module):
             hidden_layer_size=self.hidden_layer_size,
             activation=self.activation,
             objective="regression",
-            beta=self.beta,
             random_state=self.random_state,
         )
 
@@ -123,7 +113,6 @@ class TwoTowerModel(nn.Module):
             hidden_layer_size=self.hidden_layer_size,
             activation=self.activation,
             objective="regression",
-            beta=self.beta,
             random_state=self.random_state,
         )
 
@@ -135,5 +124,5 @@ class TwoTowerModel(nn.Module):
         if self.objective == "regression":
             return logits
 
-        pi = torch.softmax(logits, dim=1)
+        pi = torch.softmax(self.beta * logits, dim=1)
         return pi
